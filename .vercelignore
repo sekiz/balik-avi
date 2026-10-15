@@ -1,0 +1,14 @@
+# three.js comes from the studio locally (a symlink into the Genex app); on Vercel /vendor/ is
+# rewritten to the same release (r185) on jsDelivr — see vercel.json
+vendor
+.claude
+# editable sources and tooling the game never requests (it loads the .webp copies)
+assets/ui/*.png
+assets/ui/*.prompt.txt
+assets/src
+tools
+docs
+references
+.studio
+NOTES.md
+CLAUDE.md

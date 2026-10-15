@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/vendor/three/:path*", "destination": "https://cdn.jsdelivr.net/npm/three@0.185.0/:path*" },
+    { "source": "/vendor/:file", "destination": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/:file" }
+  ],
+  "headers": [
+    { "source": "/assets/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }] }
+  ]
+}
