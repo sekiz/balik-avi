@@ -1,0 +1,93 @@
+<!doctype html>
+<!--
+  The English title art (assets/ui/logo-en.png / .webp), composed in a canvas: Lilita One letters
+  styled after the Turkish logo (yellow gradient face, orange depth edge, gloss, thick blue water
+  backing), bubbles, and the blue-tang / clownfish collection portraits as mascots.
+  Re-render: serve the project root (with /vendor not needed), open /assets/src/logo-en.html,
+  screenshot the 900x541 canvas with a transparent background to assets/ui/logo-en.png, then run
+  tools/build-webp.sh.
+-->
+<html><head><meta charset="utf-8">
+<style>@font-face{font-family:'Lilita One';src:url(/assets/fonts/lilita-one-latin.woff2) format('woff2')}html,body{margin:0;background:transparent}canvas{display:block}</style>
+</head><body>
+<canvas id="c" width="900" height="541"></canvas>
+<script>
+const W = 900, H = 541;
+const c = document.getElementById("c");
+const g = c.getContext("2d");
+const load = (src) => new Promise((r, e) => { const i = new Image(); i.onload = () => r(i); i.onerror = e; i.src = src; });
+
+function bubble(x, y, r) {
+  const gr = g.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+  gr.addColorStop(0, "rgba(255,255,255,0.95)");
+  gr.addColorStop(0.25, "rgba(150,220,255,0.75)");
+  gr.addColorStop(0.8, "rgba(20,120,230,0.85)");
+  gr.addColorStop(1, "rgba(10,70,180,0.95)");
+  g.fillStyle = gr;
+  g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = "rgba(220,245,255,0.9)"; g.lineWidth = Math.max(1.5, r * 0.08);
+  g.beginPath(); g.arc(x, y, r * 0.92, Math.PI * 1.1, Math.PI * 1.55); g.stroke();
+}
+
+function word(text, cx, cy, size, track) {
+  g.font = `${size}px 'Lilita One'`;
+  g.textBaseline = "middle";
+  // per-letter layout so the letters can be tracked a little wider, like the Turkish logo
+  const widths = [...text].map((ch) => g.measureText(ch).width);
+  const total = widths.reduce((a, b) => a + b, 0) + track * (text.length - 1);
+  let x = cx - total / 2;
+  const pos = widths.map((w) => { const p = x; x += w + track; return p; });
+  return { text, pos, cy, size };
+}
+
+function pass(words, fn) { for (const w of words) [...w.text].forEach((ch, i) => fn(ch, w.pos[i], w.cy, w)); }
+
+(async () => {
+  await document.fonts.load("200px 'Lilita One'");
+  // the mascots come from the collection portraits (transparent, same cartoon style as the logo)
+  const tang = await load("/assets/ui/fish-tang.png");
+  const clown = await load("/assets/ui/fish-clown.png");
+  const words = [word("FISH", W / 2, 160, 210, 10), word("HUNT", W / 2, 362, 210, 8)];
+  g.lineJoin = "round";
+  g.miterLimit = 2;
+
+  // 1. the water backing: a thick deep-blue blob around the letters, then a brighter rim
+  pass(words, (ch, x, y) => { g.strokeStyle = "#0a3f9e"; g.lineWidth = 92; g.strokeText(ch, x, y); g.fillStyle = "#0a3f9e"; g.fillText(ch, x, y); });
+  pass(words, (ch, x, y) => { g.strokeStyle = "#1f7fe8"; g.lineWidth = 62; g.strokeText(ch, x, y); });
+  pass(words, (ch, x, y) => { g.strokeStyle = "#0d4fb8"; g.lineWidth = 40; g.strokeText(ch, x, y); });
+
+  // 2. splash droplets and bubbles around the backing
+  const drops = [[118, 110, 24], [790, 140, 20], [92, 220, 14], [818, 238, 15], [262, 40, 26], [650, 34, 20], [455, 498, 15], [560, 502, 11]];
+  for (const [x, y, r] of drops) bubble(x, y, r);
+
+  // 3. the letters: dark outline, orange depth edge, yellow gradient face, glossy top
+  pass(words, (ch, x, y) => { g.strokeStyle = "#5a2c00"; g.lineWidth = 18; g.strokeText(ch, x, y + 6); });
+  pass(words, (ch, x, y) => { g.fillStyle = "#e07a00"; g.fillText(ch, x, y + 8); });
+  pass(words, (ch, x, y, w) => {
+    const gr = g.createLinearGradient(0, y - w.size * 0.45, 0, y + w.size * 0.45);
+    gr.addColorStop(0, "#fff3a0");
+    gr.addColorStop(0.35, "#ffd83a");
+    gr.addColorStop(0.75, "#ffb400");
+    gr.addColorStop(1, "#ff9a00");
+    g.fillStyle = gr; g.fillText(ch, x, y);
+  });
+  // gloss: the upper part of each letter, lighter, clipped to the letter itself
+  pass(words, (ch, x, y, w) => {
+    g.save();
+    g.beginPath(); g.rect(x - 10, y - w.size * 0.5, w.size, w.size * 0.36); g.clip();
+    g.globalAlpha = 0.45; g.fillStyle = "#fffbe0"; g.fillText(ch, x, y); g.restore();
+  });
+  pass(words, (ch, x, y) => { g.strokeStyle = "rgba(120,60,0,0.55)"; g.lineWidth = 3; g.strokeText(ch, x, y); });
+
+  // 4. the two mascots, lifted from the Turkish logo (same art, same backing colour)
+  // blue tang lower left looking in; clownfish lower right, mirrored so it looks in too
+  g.drawImage(tang, 0, 0, 512, 320, -24, 300, 336, 210);
+  g.save();
+  g.translate(W, 0);
+  g.scale(-1, 1);
+  g.drawImage(clown, 0, 0, 512, 320, -20, 308, 326, 204);
+  g.restore();
+  for (const [x, y, r] of [[60, 300, 12], [112, 276, 8], [842, 300, 12], [800, 280, 8], [300, 512, 10], [612, 516, 9]]) bubble(x, y, r);
+  window.done = true;
+})();
+</script></body></html>
