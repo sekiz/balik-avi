@@ -1,5 +1,9 @@
 <!doctype html>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#05070d" />
 <title>Balık Avı</title>
 <style>
   html,
@@ -10,11 +14,22 @@
     color: #cfd6e4;
     font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
     overflow: hidden;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    position: fixed;
+    inset: 0;
+    height: 100dvh;
   }
   canvas {
     display: block;
     width: 100%;
     height: 100%;
+    touch-action: none;
   }
   #fatal {
     position: fixed;
@@ -56,4 +71,4 @@
     window.__studio_error = { message: event.message, stack: event.error?.stack ?? "" };
   });
 </script>
-<script type="module" src="/src/main.js"></script>
+<script type="module" src="/src/main.js?v=settings-5"></script>

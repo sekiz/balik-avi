@@ -1,12 +1,72 @@
 /** The aquarium: sandy seabed with moving caustics, rocks, corals, swaying kelp, light shafts, bubbles. */
 import * as THREE from "three";
-import { bakeTexture, makeRng, standardMaterial, triplanar } from "../materials.js";
+import { bakeTexture, makeRng, triplanar } from "../materials.js";
+import { kitMaterial } from "./kit.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { swimTime } from "./fishmodels.js";
+import { buildWreck } from "./wreck.js";
+import { buildDeep } from "./deep.js";
 
 function tag(o, t) {
   o.userData.tag = t;
   return o;
 }
+
+/**
+ * Draw-call budget: a static prop group of hundreds of meshes becomes one mesh per material.
+ * Safe for every material here that works in world space (caustics, triplanar stone); animated
+ * kelp / anemones use `instanceGroup` instead because their shaders read per-object phase.
+ */
+function mergeStatic(group) {
+  group.updateMatrixWorld(true);
+  const buckets = new Map();
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    const list = buckets.get(o.material) ?? [];
+    list.push(o);
+    buckets.set(o.material, list);
+  });
+  for (const child of [...group.children]) group.remove(child);
+  for (const [material, meshes] of buckets) {
+    const geos = meshes.map((m) => {
+      let g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+      for (const name of Object.keys(g.attributes)) if (!["position", "normal", "uv"].includes(name)) g.deleteAttribute(name);
+      g.applyMatrix4(m.matrixWorld);
+      return g;
+    });
+    const merged = new THREE.Mesh(mergeGeometries(geos, false), material);
+    merged.frustumCulled = false;
+    group.add(merged);
+    for (const g of geos) g.dispose();
+  }
+}
+
+/** Same idea for meshes whose shader needs a per-object matrix: one InstancedMesh per geometry+material. */
+function instanceGroup(group) {
+  group.updateMatrixWorld(true);
+  const buckets = new Map();
+  group.traverse((o) => {
+    if (!o.isMesh) return;
+    const key = `${o.geometry.uuid}|${o.material.uuid}`;
+    const b = buckets.get(key) ?? { geo: o.geometry, mat: o.material, mats: [] };
+    b.mats.push(o.matrixWorld.clone());
+    buckets.set(key, b);
+  });
+  for (const child of [...group.children]) group.remove(child);
+  for (const { geo, mat, mats } of buckets.values()) {
+    const im = new THREE.InstancedMesh(geo, mat, mats.length);
+    mats.forEach((m, i) => im.setMatrixAt(i, m));
+    im.instanceMatrix.needsUpdate = true;
+    im.frustumCulled = false;
+    group.add(im);
+  }
+}
+
+const WORLD_MATRIX = `#ifdef USE_INSTANCING
+        mat4 wm = modelMatrix * instanceMatrix;
+        #else
+        mat4 wm = modelMatrix;
+        #endif`;
 
 /** Tileable Voronoi-edge texture: bright thin cell borders, the shape of real caustic light. */
 let causticTex = null;
@@ -50,6 +110,9 @@ function causticTexture() {
 }
 
 /** Add animated caustics (two drifting Voronoi layers, min-combined) to a lit material. */
+/** How much sunlight reaches the floor: scales every caustic (the deep room turns it nearly off). */
+const causticLevel = { value: 1 };
+
 function caustics(material, strength = 0.55) {
   const prev = material.onBeforeCompile;
   const tex = causticTexture();
@@ -57,6 +120,7 @@ function caustics(material, strength = 0.55) {
     prev?.(shader, r);
     shader.uniforms.uTime = swimTime;
     shader.uniforms.uCaustic = { value: tex };
+    shader.uniforms.uCausticLevel = causticLevel;
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vWorldC;")
       .replace("#include <worldpos_vertex>", "#include <worldpos_vertex>\nvWorldC = (modelMatrix * vec4(transformed, 1.0)).xyz;");
@@ -66,7 +130,8 @@ function caustics(material, strength = 0.55) {
         `#include <common>
         varying vec3 vWorldC;
         uniform float uTime;
-        uniform sampler2D uCaustic;`,
+        uniform sampler2D uCaustic;
+        uniform float uCausticLevel;`,
       )
       .replace(
         "#include <emissivemap_fragment>",
@@ -75,7 +140,7 @@ function caustics(material, strength = 0.55) {
         float ca = texture2D(uCaustic, cuv + vec2(uTime * 0.021, uTime * 0.013)).r;
         float cb = texture2D(uCaustic, cuv * 1.27 + vec2(-uTime * 0.017, uTime * 0.024) + 0.37).r;
         float cst = min(ca, cb) * 1.6 + ca * cb * 0.8;
-        totalEmissiveRadiance += vec3(0.75, 0.95, 1.0) * cst * ${strength.toFixed(2)} * (0.05 + diffuseColor.rgb * 0.9);`,
+        totalEmissiveRadiance += vec3(0.75, 0.95, 1.0) * cst * ${strength.toFixed(2)} * uCausticLevel * (0.05 + diffuseColor.rgb * 0.9);`,
       );
   };
   material.customProgramCacheKey = () => `caustic${strength}${material.userData.triplanar ? "t" : ""}`;
@@ -158,7 +223,8 @@ function sway(material) {
         "#include <begin_vertex>",
         `#include <begin_vertex>
         float hgt = clamp(position.y / 4.0, 0.0, 1.0);
-        float ph = modelMatrix[3].x * 0.7 + modelMatrix[3].z * 0.4;
+        ${WORLD_MATRIX}
+        float ph = wm[3].x * 0.7 + wm[3].z * 0.4;
         transformed.x += sin(uTime * 1.3 + ph + position.y * 0.9) * 0.45 * hgt * hgt;
         transformed.z += cos(uTime * 1.1 + ph) * 0.25 * hgt * hgt;`,
       );
@@ -322,7 +388,8 @@ function anemoneMat(color, tip) {
         `#include <begin_vertex>
         float hgt = clamp(position.y / 0.9, 0.0, 1.0);
         vH = hgt;
-        float ph = modelMatrix[3].x * 1.7 + modelMatrix[3].z * 1.3;
+        ${WORLD_MATRIX}
+        float ph = wm[3].x * 1.7 + wm[3].z * 1.3;
         transformed.x += sin(uTime * 1.8 + ph) * 0.18 * hgt * hgt;
         transformed.z += cos(uTime * 1.5 + ph) * 0.14 * hgt * hgt;`,
       );
@@ -358,6 +425,7 @@ function lump(rng, detailW = 22, detailH = 16, rough = 0.18) {
 export function buildWorld(scene) {
   const rng = makeRng(4242);
   scene.background = new THREE.Color(0x05304f);
+  // fish materials opt out of fog (fishmodels.js swimify): the haze stays on the reef and sand
   scene.fog = new THREE.Fog(0x0a5a86, 14, 50);
 
   const hemi = new THREE.HemisphereLight(0x8fd8ff, 0x0a2238, 0.85);
@@ -393,15 +461,20 @@ export function buildWorld(scene) {
 
   // ── reef rock formations framing the field ──
   const rockMat = caustics(
-    triplanar(standardMaterial({ kind: "stone", seed: 5, palette: [0x5a4a3e, 0x7d6c5a, 0x9a8a74], repeat: 1, bumpScale: 1.5 }), { scale: 0.35 }),
+    triplanar(kitMaterial({ kind: "stone", seed: 5, palette: [0x5a4a3e, 0x7d6c5a, 0x9a8a74], repeat: 1, bumpScale: 1.5 }), { scale: 0.35 }),
     0.6,
   );
   const mossMat = caustics(
-    triplanar(standardMaterial({ kind: "moss", seed: 8, palette: [0x2d5a36, 0x3f7a44, 0x7aa858], repeat: 1 }), { scale: 0.45 }),
+    triplanar(kitMaterial({ kind: "moss", seed: 8, palette: [0x2d5a36, 0x3f7a44, 0x7aa858], repeat: 1 }), { scale: 0.45 }),
     0.6,
   );
   const rocks = tag(new THREE.Group(), "rock");
   root.add(rocks);
+  // the rocks (and kelp) in front of where the wreck's hull lies: their own group, so the wreck
+  // room can clear them away and the hull reads (left edge, z -7 … 6)
+  const hullSide = (x, z) => x < -13 && z > -7 && z < 6;
+  const rocksHull = tag(new THREE.Group(), "rock");
+  root.add(rocksHull);
   const rockGeos = Array.from({ length: 6 }, () => lump(rng));
   // clusters: [x, z, scale, count]
   const clusters = [
@@ -409,19 +482,20 @@ export function buildWorld(scene) {
     [-9, -12.5, 2.4, 3], [0, -13, 2.2, 3], [9, -12.5, 2.5, 3], [-11, 10.5, 1.8, 2], [11, 10.5, 1.8, 2],
   ];
   for (const [cx, cz, s, n] of clusters) {
+    const into = hullSide(cx, cz) ? rocksHull : rocks;
     for (let i = 0; i < n; i++) {
       const rock = new THREE.Mesh(rockGeos[Math.floor(rng() * rockGeos.length)], rockMat);
       const sc = s * (0.45 + rng() * 0.6);
       rock.position.set(cx + (rng() - 0.5) * s * 1.6, sc * 0.2, cz + (rng() - 0.5) * s * 1.4);
       rock.scale.set(sc * (1 + rng() * 0.5), sc * (0.55 + rng() * 0.5), sc);
       rock.rotation.y = rng() * 6;
-      rocks.add(rock);
+      into.add(rock);
       if (rng() < 0.55) {
         const cap = new THREE.Mesh(rock.geometry, mossMat);
         cap.position.copy(rock.position).add(new THREE.Vector3(0, rock.scale.y * 0.35, 0));
         cap.scale.set(rock.scale.x * 0.8, rock.scale.y * 0.45, rock.scale.z * 0.8);
         cap.rotation.copy(rock.rotation);
-        rocks.add(cap);
+        into.add(cap);
       }
     }
   }
@@ -435,7 +509,7 @@ export function buildWorld(scene) {
     [0xffd23a, 0xfff08a, 0xd9a20a],
   ];
   const coralMats = coralCols.map((pal, i) => {
-    const m = caustics(standardMaterial({ kind: "chitin", seed: 20 + i, palette: pal, repeat: 1, roughness: 0.55 }), 0.4);
+    const m = caustics(kitMaterial({ kind: "chitin", seed: 20 + i, palette: pal, repeat: 1, roughness: 0.55 }), 0.4);
     m.emissive = new THREE.Color(pal[0]).multiplyScalar(0.12);
     return m;
   });
@@ -461,7 +535,7 @@ export function buildWorld(scene) {
     caustics(new THREE.MeshStandardMaterial({ map: brainTexture("#8ac25a", "#2f5a20"), roughness: 0.7, bumpMap: brainTexture("#ffffff", "#000000"), bumpScale: 2 }), 0.5),
   ];
   const brainGeo = lump(rng, 28, 20, 0.08);
-  const tubeMat = caustics(standardMaterial({ kind: "chitin", seed: 44, palette: [0x7a3ce0, 0xb486ff, 0x4a1a9a], repeat: 1 }), 0.4);
+  const tubeMat = caustics(kitMaterial({ kind: "chitin", seed: 44, palette: [0x7a3ce0, 0xb486ff, 0x4a1a9a], repeat: 1 }), 0.4);
   const tubeGeo = new THREE.CylinderGeometry(0.22, 0.3, 1, 14, 1, true);
   tubeGeo.translate(0, 0.5, 0);
   tubeMat.side = THREE.DoubleSide;
@@ -568,7 +642,7 @@ export function buildWorld(scene) {
     s.rotation.y = rng() * 6;
     details.add(s);
   }
-  const pebbleMat = caustics(standardMaterial({ kind: "stone", seed: 66, palette: [0x6a6258, 0x8c8272, 0xa69a86], repeat: 1 }), 0.6);
+  const pebbleMat = caustics(kitMaterial({ kind: "stone", seed: 66, palette: [0x6a6258, 0x8c8272, 0xa69a86], repeat: 1 }), 0.6);
   const pebbleGeo = lump(rng, 10, 8, 0.15);
   for (let i = 0; i < 60; i++) {
     const s = new THREE.Mesh(pebbleGeo, pebbleMat);
@@ -577,11 +651,23 @@ export function buildWorld(scene) {
     details.add(s);
   }
 
+  mergeStatic(rocks);
+  mergeStatic(rocksHull);
+  mergeStatic(corals);
+  mergeStatic(details);
+  instanceGroup(anemoneRoot);
+
+  // ── the shipwreck room's set (hidden in the reef) ──
+  const wreck = buildWreck(root, { caustics });
+  // ── the deep sea room's set (hidden elsewhere) ──
+  const deep = buildDeep(root, { caustics });
+
   // ── kelp ──
   const kelpMat = sway(
     new THREE.MeshStandardMaterial({ map: seaweedTexture(), transparent: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.8 }),
   );
   const kelp = tag(new THREE.Group(), "kelp");
+  const kelpHull = tag(new THREE.Group(), "kelp");
   root.add(kelp);
   const kelpGeo = new THREE.PlaneGeometry(0.9, 5, 1, 10);
   kelpGeo.translate(0, 2.5, 0);
@@ -594,7 +680,7 @@ export function buildWorld(scene) {
       blade.position.set(x + (rng() - 0.5) * 0.8, 0.5, z + (rng() - 0.5) * 0.8);
       blade.rotation.y = rng() * Math.PI;
       blade.scale.set(1, 0.7 + rng() * 0.8, 1);
-      kelp.add(blade);
+      (hullSide(x, z) ? kelpHull : kelp).add(blade);
     }
   }
   for (let i = 0; i < 14; i++) {
@@ -604,6 +690,10 @@ export function buildWorld(scene) {
     blade.scale.y = 0.8 + rng() * 0.6;
     kelp.add(blade);
   }
+
+  instanceGroup(kelp);
+  instanceGroup(kelpHull);
+  root.add(kelpHull);
 
   // ── light shafts ──
   const shaftMat = new THREE.MeshBasicMaterial({
@@ -627,19 +717,37 @@ export function buildWorld(scene) {
   }
 
   // ── bubbles + drifting plankton motes ──
-  const bubbleMat = new THREE.SpriteMaterial({ map: bubbleTexture(), transparent: true, depthWrite: false, opacity: 0.75 });
+  // Points, not Sprites: one draw per size class instead of one per bubble. Point size is in
+  // world units × 2.6 to match the apparent size a sprite of that scale had at this fov.
+  const POINT_K = 2.6;
+  const bubbleTex = bubbleTexture();
   const bubbles = tag(new THREE.Group(), "bubble");
   scene.add(bubbles);
   // bubble columns rising from vents in the reef
   const vents = [[-15.5, -5], [16, -2], [-14.5, 6], [15, 8]];
+  const bubbleClasses = [0.16, 0.26, 0.37].map((size) => {
+    const pts = new THREE.Points(
+      new THREE.BufferGeometry(),
+      new THREE.PointsMaterial({ map: bubbleTex, size: size * POINT_K, sizeAttenuation: true, transparent: true, depthWrite: false, opacity: 0.75 }),
+    );
+    pts.frustumCulled = false;
+    pts.userData.items = [];
+    bubbles.add(pts);
+    return pts;
+  });
   for (let i = 0; i < 48; i++) {
-    const b = new THREE.Sprite(bubbleMat);
-    const s = 0.12 + rng() * 0.25;
-    b.scale.set(s, s, s);
     const v = vents[i % vents.length];
-    b.position.set(v[0] + (rng() - 0.5) * 0.6, rng() * 14, v[1] + (rng() - 0.5) * 0.6);
-    b.userData = { speed: 1.2 + rng() * 1.4, phase: rng() * 6, vx: v[0], vz: v[1] };
-    bubbles.add(b);
+    bubbleClasses[i % 3].userData.items.push({
+      x: v[0] + (rng() - 0.5) * 0.6,
+      y: rng() * 14,
+      z: v[1] + (rng() - 0.5) * 0.6,
+      speed: 1.2 + rng() * 1.4,
+      phase: rng() * 6,
+      vx: v[0],
+    });
+  }
+  for (const pts of bubbleClasses) {
+    pts.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pts.userData.items.length * 3), 3));
   }
   const moteTex = canvasTex(32, 32, (g, w, h) => {
     const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
@@ -648,31 +756,80 @@ export function buildWorld(scene) {
     g.fillStyle = grad;
     g.fillRect(0, 0, w, h);
   });
-  const motes = new THREE.Group();
+  const moteItems = Array.from({ length: 70 }, () => ({
+    x: -18 + rng() * 36,
+    y: 1 + rng() * 9,
+    z: -11 + rng() * 22,
+    phase: rng() * 6,
+  }));
+  const motes = new THREE.Points(
+    new THREE.BufferGeometry(),
+    new THREE.PointsMaterial({ map: moteTex, size: 0.14 * POINT_K, sizeAttenuation: true, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending }),
+  );
+  motes.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(moteItems.length * 3), 3));
+  motes.frustumCulled = false;
   motes.userData.tag = "plankton";
   scene.add(motes);
-  const moteMat = new THREE.SpriteMaterial({ map: moteTex, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending });
-  for (let i = 0; i < 70; i++) {
-    const m = new THREE.Sprite(moteMat);
-    m.scale.setScalar(0.08 + rng() * 0.12);
-    m.position.set(-18 + rng() * 36, 1 + rng() * 9, -11 + rng() * 22);
-    m.userData.phase = rng() * 6;
-    motes.add(m);
+
+  /**
+   * Room looks: the reef is the scene as built above; the wreck hides the bright coral gardens,
+   * shows the wreck set and turns the water darker and greener (deeper, older water).
+   */
+  const LOOKS = {
+    reef: { bg: 0x05304f, fog: 0x0a5a86, fogFar: 50, sky: 0x8fd8ff, ground: 0x0a2238, hemi: 0.85, sun: 0xfff0d0, sunI: 2.4, sand: 0x9fb4b4, shafts: 0.07, caustic: 1, rock: 0xffffff, motes: 0xdcffff, moteOp: 0.35 },
+    wreck: { bg: 0x03222a, fog: 0x0b4048, fogFar: 50, sky: 0x7fc8c0, ground: 0x061a1c, hemi: 0.75, sun: 0xd8f0e0, sunI: 1.8, sand: 0x7f948a, shafts: 0.05, caustic: 0.8, rock: 0xffffff, motes: 0xdcffff, moteOp: 0.35 },
+    // the abyss: a faint blue top light, short haze, the floor lit by its own chimneys and glowing life
+    deep: { bg: 0x010812, fog: 0x031428, fogFar: 40, sky: 0x3a6a9a, ground: 0x02060c, hemi: 0.55, sun: 0x8ab0e0, sunI: 0.7, sand: 0x4a5866, shafts: 0, caustic: 0.12, rock: 0x6a7480, motes: 0x7af0ff, moteOp: 0.85 },
+  };
+  function setRoom(id) {
+    const L = LOOKS[id] ?? LOOKS.reef;
+    scene.background.set(L.bg);
+    scene.fog.color.set(L.fog);
+    hemi.color.set(L.sky);
+    hemi.groundColor.set(L.ground);
+    hemi.intensity = L.hemi;
+    sun.color.set(L.sun);
+    sun.intensity = L.sunI;
+    sandMat.color.set(L.sand);
+    shaftMat.opacity = L.shafts;
+    scene.fog.far = L.fogFar;
+    causticLevel.value = L.caustic;
+    rockMat.color.set(L.rock);
+    mossMat.color.set(L.rock);
+    motes.material.color.set(L.motes);
+    motes.material.opacity = L.moteOp;
+    const deepRoom = id === "deep";
+    deep.root.visible = deepRoom;
+    kelp.visible = !deepRoom;
+    const wreckRoom = id === "wreck";
+    corals.visible = !wreckRoom && !deepRoom;
+    rocksHull.visible = !wreckRoom;
+    kelpHull.visible = !wreckRoom && !deepRoom;
+    anemoneRoot.visible = !wreckRoom && !deepRoom;
+    wreck.root.visible = wreckRoom;
   }
 
   return {
+    setRoom,
     update(dt, t) {
       for (const s of shafts.children) s.position.x += Math.sin(t * 0.2 + s.userData.phase) * dt * 0.15;
-      for (const b of bubbles.children) {
-        const u = b.userData;
-        b.position.y += u.speed * dt;
-        b.position.x = u.vx + Math.sin(t * 2 + u.phase) * 0.25 * (b.position.y / 6);
-        if (b.position.y > 15) b.position.y = 0.3;
+      for (const pts of bubbleClasses) {
+        const pos = pts.geometry.attributes.position;
+        pts.userData.items.forEach((u, i) => {
+          u.y += u.speed * dt;
+          if (u.y > 15) u.y = 0.3;
+          u.x = u.vx + Math.sin(t * 2 + u.phase) * 0.25 * (u.y / 6);
+          pos.setXYZ(i, u.x, u.y, u.z);
+        });
+        pos.needsUpdate = true;
       }
-      for (const m of motes.children) {
-        m.position.x += Math.sin(t * 0.3 + m.userData.phase) * dt * 0.12;
-        m.position.y += Math.cos(t * 0.25 + m.userData.phase) * dt * 0.08;
-      }
+      const mp = motes.geometry.attributes.position;
+      moteItems.forEach((m, i) => {
+        m.x += Math.sin(t * 0.3 + m.phase) * dt * 0.12;
+        m.y += Math.cos(t * 0.25 + m.phase) * dt * 0.08;
+        mp.setXYZ(i, m.x, m.y, m.z);
+      });
+      mp.needsUpdate = true;
     },
   };
 }

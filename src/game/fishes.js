@@ -9,6 +9,10 @@ export const LENGTH = {
   angel: 3.2, puffer: 2.8, parrot: 3.5, lion: 3.4,
   turtle: 5.4, manta: 6.6, shark: 7.4,
   goldshark: 9.6, dragon: 2.6,
+  treasure: 4.4,
+  seahorse: 2.2, barracuda: 4.4, lantern: 3.1, octopus: 6.0, kraken: 12,
+  jelly: 2.6, eel: 5.6, squid: 6.2, giantsquid: 13.5, mine: 3.2,
+  volt: 3.2, frost: 3.0,
 };
 
 const DEPTH = { small: 3.4, medium: 3.1, large: 2.6, boss: 2.1 };
@@ -31,6 +35,7 @@ function shadowTexture() {
   return shadowTex;
 }
 const shadowGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+const MAX_SHADOWS = 96; // 26 fish + a dragon's 13 segments, with room to spare
 let shadowMat = null;
 
 export class FishSchool {
@@ -41,16 +46,24 @@ export class FishSchool {
     this.root.userData.tag = "fish";
     scene.add(this.root);
     this.list = [];
-    this.shadows = new THREE.Group();
+    // every blob shadow on the sand is one instance: a fish (or dragon segment) keeps a plain
+    // transform handle and the layer is rewritten once per update — one draw for all shadows
+    shadowMat ??= new THREE.MeshBasicMaterial({ map: shadowTexture(), transparent: true, depthWrite: false, fog: false });
+    this.shadows = new THREE.InstancedMesh(shadowGeo, shadowMat, MAX_SHADOWS);
+    this.shadows.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.shadows.count = 0;
+    this.shadows.frustumCulled = false;
+    this.shadows.renderOrder = -1;
     this.shadows.userData.tag = "fish-shadow";
     scene.add(this.shadows);
-    shadowMat ??= new THREE.MeshBasicMaterial({ map: shadowTexture(), transparent: true, depthWrite: false, fog: false });
+    this.shadowHandles = new Set();
     this.speedScale = 1;
     this.onLeave = null;
   }
 
   clear() {
     for (let i = this.list.length - 1; i >= 0; i--) this.remove(i);
+    this.writeShadows();
   }
 
   alive() {
@@ -150,7 +163,8 @@ export class FishSchool {
     group.rotation.order = "YXZ";
     group.rotation.y = Math.atan2(-dir.z, dir.x);
     // bony fish lean their flank toward the overhead camera so their side pattern reads
-    fish.roll = sp.id === "manta" || sp.id === "turtle" || sp.id === "dragon" ? 0 : -0.55;
+    // flat swimmers are seen from above as they are; the rest lean their side toward the camera
+    fish.roll = ["manta", "turtle", "dragon", "treasure", "octopus", "kraken", "jelly", "eel", "squid", "giantsquid", "mine"].includes(sp.id) ? 0 : -0.55;
     group.rotation.x = fish.roll;
     fish.shadow = this.makeShadow(L * (sp.id === "manta" ? 1.0 : sp.id === "turtle" ? 0.9 : 0.75), L * (sp.id === "manta" ? 0.9 : sp.id === "turtle" ? 0.75 : 0.35));
     if (segments) fish.segShadows = segments.map((sg) => this.makeShadow(1.6 * (sg.userData.r / 0.65), 1.4 * (sg.userData.r / 0.65)));
@@ -188,25 +202,39 @@ export class FishSchool {
 
   layBody(f, k) {
     const yaw = f.group.rotation.y;
-    const fwd = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-    const pts = [f.pos.clone().addScaledVector(fwd, -0.4), f.pos.clone().addScaledVector(fwd, -1.2)];
-    for (const seg of f.segments) pts.push(seg.position.clone());
+    const n = f.segments.length + 2;
+    const pts = f.bodyPts ?? (f.bodyPts = Array.from({ length: n }, () => new THREE.Vector3()));
+    const cy = Math.cos(yaw);
+    const sy = -Math.sin(yaw);
+    pts[0].set(f.pos.x - cy * 0.4, f.pos.y, f.pos.z - sy * 0.4);
+    pts[1].set(f.pos.x - cy * 1.2, f.pos.y, f.pos.z - sy * 1.2);
+    f.segments.forEach((seg, i) => pts[i + 2].copy(seg.position));
     f.body.update(pts, 0.85 * k);
   }
 
   makeShadow(w, h) {
-    const m = new THREE.Mesh(shadowGeo, shadowMat);
+    const m = new THREE.Object3D();
     m.scale.set(w, 1, h);
-    m.renderOrder = -1;
-    this.shadows.add(m);
+    this.shadowHandles.add(m);
     return m;
+  }
+
+  /** Copy the visible shadow handles into the instanced layer. */
+  writeShadows() {
+    let n = 0;
+    for (const h of this.shadowHandles) {
+      if (!h.visible || n >= MAX_SHADOWS) continue;
+      h.updateMatrix();
+      this.shadows.setMatrixAt(n++, h.matrix);
+    }
+    this.shadows.count = n;
+    this.shadows.instanceMatrix.needsUpdate = true;
   }
 
   syncShadow(sh, obj, scale = 1) {
     // the key light is up-left: shadows fall down-right on the sand, softer and wider for higher fish
     sh.position.set(obj.position.x + obj.position.y * 0.33, 0.5, obj.position.z + obj.position.y * 0.2);
     sh.rotation.y = obj.rotation.y;
-    sh.material.opacity = 1;
     sh.visible = scale > 0.02;
   }
 
@@ -217,6 +245,9 @@ export class FishSchool {
     const s = Math.sin(-f.group.rotation.y);
     const at = (along, r) => out.push({ x: f.pos.x + c * along, z: f.pos.z + s * along, r });
     switch (f.sp.id) {
+      case "treasure":
+        at(0, f.L * 0.5);
+        break;
       case "manta":
         at(0.1 * f.L, f.L * 0.42);
         break;
@@ -230,11 +261,48 @@ export class FishSchool {
       case "puffer":
         at(0, f.L * 0.42);
         break;
+      case "seahorse":
+        at(0, f.L * 0.36);
+        break;
+      case "jelly":
+        at(f.L * 0.15, f.L * 0.3);
+        break;
+      case "eel":
+        at(f.L * 0.35, f.L * 0.09);
+        at(f.L * 0.05, f.L * 0.09);
+        at(-f.L * 0.25, f.L * 0.08);
+        break;
+      case "squid":
+        at(f.L * 0.22, f.L * 0.18);
+        at(-f.L * 0.15, f.L * 0.22);
+        break;
+      case "giantsquid":
+        at(f.L * 0.25, f.L * 0.16);
+        at(-f.L * 0.05, f.L * 0.2);
+        at(-f.L * 0.32, f.L * 0.18);
+        break;
+      case "mine":
+        at(0, f.L * 0.42);
+        break;
+      case "octopus":
+        at(f.L * 0.18, f.L * 0.24);
+        at(-f.L * 0.2, f.L * 0.3);
+        break;
+      case "kraken":
+        at(f.L * 0.2, f.L * 0.2);
+        at(-f.L * 0.12, f.L * 0.28);
+        at(-f.L * 0.38, f.L * 0.2);
+        break;
       default:
         at(f.L * 0.22, f.L * 0.24);
         at(-f.L * 0.18, f.L * 0.2);
     }
     return out;
+  }
+
+  /** Freeze every fish on screen for `seconds` (a frost fish's prize). */
+  freeze(seconds) {
+    for (const f of this.list) if (!f.dying) f.frozen = seconds;
   }
 
   hitFlash(f) {
@@ -271,8 +339,20 @@ export class FishSchool {
         if (k >= 1) this.remove(i);
         continue;
       }
-      f.flash.value.setRGB(f.hitGlow * 0.9, f.hitGlow * 0.15, f.hitGlow * 0.1);
-      f.group.rotation.x = f.roll; // flank toward the overhead camera (local +z leans up for any heading)
+      // a golden fish glows gold through its whole body, pulsing (not just a halo behind it)
+      // (kept below white: a pale fish must turn gold, not blow out)
+      const gold = f.gold ? 0.1 + 0.05 * Math.sin(f.t * 5) : 0;
+      f.flash.value.setRGB(f.hitGlow * 0.9 + gold, f.hitGlow * 0.15 + gold * 0.55, f.hitGlow * 0.1);
+      // frozen by a frost fish: held in place under an icy tint, and it cannot swim off meanwhile
+      if (f.frozen > 0) {
+        f.frozen -= dt;
+        f.flash.value.setRGB(f.hitGlow * 0.9 + 0.12, f.hitGlow * 0.15 + 0.28, f.hitGlow * 0.1 + 0.42);
+        this.syncShadow(f.shadow, f.group);
+        continue;
+      }
+      // flank toward the overhead camera: local +z leans up, so a fish heading -x (its +z flank
+      // facing away) leans the other way; the factor is continuous so a turning fish never snaps
+      f.group.rotation.x = f.roll * Math.max(-1, Math.min(1, Math.cos(f.group.rotation.y) * 3));
       f.group.rotation.z = 0;
       const v = f.speed * this.speedScale;
       if (f.behavior === "curve") f.dir.applyAxisAngle(THREE.Object3D.DEFAULT_UP, f.turn * dt);
@@ -300,8 +380,8 @@ export class FishSchool {
         f.group.scale.set((f.L / 2) * puff, (f.L / 2) * puff, (f.L / 2) * puff);
       }
       if (f.trail) {
-        f.trail.unshift(f.pos.clone());
-        if (f.trail.length > 300) f.trail.pop();
+        const tp = f.trail.length >= 300 ? f.trail.pop() : new THREE.Vector3();
+        f.trail.unshift(tp.copy(f.pos));
         this.placeSegments(f);
       }
       this.syncShadow(f.shadow, f.group);
@@ -315,13 +395,14 @@ export class FishSchool {
         this.remove(i);
       }
     }
+    this.writeShadows();
   }
 
   remove(i) {
     const f = this.list[i];
     this.root.remove(f.group);
-    if (f.shadow) this.shadows.remove(f.shadow);
-    if (f.segShadows) for (const sh of f.segShadows) this.shadows.remove(sh);
+    if (f.shadow) this.shadowHandles.delete(f.shadow);
+    if (f.segShadows) for (const sh of f.segShadows) this.shadowHandles.delete(sh);
     if (f.segments) for (const s of f.segments) this.root.remove(s);
     if (f.body) {
       this.root.remove(f.body.mesh);

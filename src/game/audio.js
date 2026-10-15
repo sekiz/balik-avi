@@ -12,6 +12,10 @@ const FILES = {
   click: "assets/genex/8cc1c308-cc21-4e4a-a3d0-a8ea1309c640/soft-bubbly-ui-button-click-very-short-w-cmv9ecnk.mp3",
 };
 
+const MAX_VOICES = 24;
+/** Minimum seconds between two starts of the same sound. */
+const MIN_GAP = { hit: 0.05, coin: 0.06, click: 0.04, miss: 0.1 };
+
 export class Sound {
   constructor() {
     this.ctx = null;
@@ -22,12 +26,33 @@ export class Sound {
     this.music = null;
     this.lastShot = -1;
     this.clock = 0;
+    this.voices = 0;
+    this.lastPlayed = {};
+    // iOS/Android suspend the context when the page is hidden; pause the music with it and
+    // resume on the next input (browsers only allow resume() from a gesture).
+    document.addEventListener("visibilitychange", () => {
+      if (!this.ctx) return;
+      if (document.hidden) this.ctx.suspend?.();
+      else this.ctx.resume?.().catch?.(() => {});
+    });
+    // iOS also parks the context as "interrupted" (a call, Siri); the next tap resumes it
+    window.addEventListener("pageshow", () => this.ctx && this.ctx.state !== "running" && this.ctx.resume?.().catch?.(() => {}));
+  }
+
+  get muted() {
+    return !this.musicOn && !this.sfxOn;
+  }
+
+  /** One switch for everything: the play HUD's mute button and the M key. */
+  setMuted(muted) {
+    this.setMusic(!muted);
+    this.setSfx(!muted);
   }
 
   /** Call from an input handler (first key/click). Safe to call repeatedly. */
   unlock() {
     if (this.ctx) {
-      if (this.ctx.state === "suspended") this.ctx.resume();
+      if (this.ctx.state !== "running") this.ctx.resume?.().catch?.(() => {});
       return;
     }
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -50,7 +75,7 @@ export class Sound {
           this.buffers[name] = buf;
           if (name === "music") this.startMusic();
         })
-        .catch(() => {});
+        .catch((err) => console.warn(`[audio] ${name} unavailable, using synth fallback`, err?.message ?? err));
     }
   }
 
@@ -77,8 +102,17 @@ export class Sound {
     this.clock += dt;
   }
 
+  /** Auto-fire plus a coin rain would stack dozens of voices: per-sound spacing and a global cap. */
+  allow(name) {
+    const gap = MIN_GAP[name] ?? 0;
+    if (this.clock - (this.lastPlayed[name] ?? -9) < gap) return false;
+    if (this.voices >= MAX_VOICES && name !== "boss" && name !== "jackpot") return false;
+    this.lastPlayed[name] = this.clock;
+    return true;
+  }
+
   play(name, { volume = 1, rate = 1 } = {}) {
-    if (!this.ctx || !this.sfxOn) return;
+    if (!this.ctx || !this.sfxOn || !this.allow(name)) return;
     const buf = this.buffers[name];
     if (!buf) return this.synth(name, volume);
     const src = this.ctx.createBufferSource();
@@ -87,6 +121,11 @@ export class Sound {
     const g = this.ctx.createGain();
     g.gain.value = volume;
     src.connect(g).connect(this.master);
+    this.voices++;
+    src.onended = () => {
+      this.voices--;
+      g.disconnect();
+    };
     src.start();
   }
 
@@ -94,28 +133,42 @@ export class Sound {
     // throttle: auto-fire would otherwise stack dozens of samples
     if (this.clock - this.lastShot < 0.07) return;
     this.lastShot = this.clock;
-    this.play("shot", { volume: 0.45, rate: 1.15 - Math.min(0.35, bet * 0.03) });
+    this.play("shot", { volume: 0.45, rate: 1.15 - Math.min(0.35, Math.log2(bet + 1) * 0.1) });
   }
 
   /** Procedural net pop (and fallback for any missing file). */
-  synth(name, volume = 1) {
+  synth(name, volume = 1, pitch = 1) {
     if (!this.ctx || !this.sfxOn) return;
     const t = this.ctx.currentTime;
     const o = this.ctx.createOscillator();
     const g = this.ctx.createGain();
-    const f = { hit: 520, coin: 1200, click: 800, shot: 180, boss: 70, jackpot: 900 }[name] ?? 440;
+    if (this.voices >= MAX_VOICES) return;
+    const f = ({ hit: 520, coin: 1200, click: 800, shot: 180, boss: 70, jackpot: 900, miss: 300, thump: 120, chime: 1560 }[name] ?? 440) * pitch;
     o.type = name === "boss" ? "sawtooth" : "sine";
     o.frequency.setValueAtTime(f, t);
-    o.frequency.exponentialRampToValueAtTime(name === "hit" ? f * 0.45 : f * 1.5, t + 0.12);
+    o.frequency.exponentialRampToValueAtTime(name === "hit" ? f * 0.45 : name === "thump" ? f * 0.4 : f * 1.5, t + (name === "thump" ? 0.3 : 0.12));
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(0.25 * volume, t + 0.01);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + (name === "boss" ? 1.2 : 0.18));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + (name === "boss" ? 1.2 : name === "thump" ? 0.35 : name === "chime" ? 0.5 : 0.18));
     o.connect(g).connect(this.master);
+    this.voices++;
+    o.onended = () => {
+      this.voices--;
+      g.disconnect();
+    };
     o.start(t);
-    o.stop(t + 1.3);
+    o.stop(t + (name === "boss" ? 1.3 : 0.25));
   }
 
-  hit() {
-    this.synth("hit", 0.5);
+  /** A net closing on a fish; pitch follows the bet so heavier bullets sound heavier. */
+  hit(bet = 1, combo = 0) {
+    if (!this.allow("hit")) return;
+    this.synth("hit", 0.35 + Math.min(0.3, bet * 0.03), 1 + Math.min(0.5, combo * 0.05));
+  }
+
+  /** A bullet that died without touching anything (refunded). */
+  miss() {
+    if (!this.allow("miss")) return;
+    this.synth("miss", 0.25);
   }
 }
