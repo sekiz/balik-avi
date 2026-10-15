@@ -45,6 +45,19 @@ Phase 2 prototype plus most V1 screens, so the feel and economy can be judged be
   shafts, bubbles). Cannon at bottom centre; barrels multiply and glow colour changes with the bet.
 - Audio from Genex (music loop + shot, coin, boss roar, jackpot, click) in `assets/genex/…`;
   procedural WebAudio net-hit pop. M toggles sound.
+- **Visual pass 2 (user: "görselleri beğenmedim")**: post stack in `src/game/post.js` — bloom (only
+  emissive: bullets, gems, coins), underwater grade (refraction wobble, red absorbed, water veil,
+  deep-blue vignette). Reef rebuilt in `world.js`: framing rock clusters (triplanar stone + moss
+  caps), brain corals, tube sponges, lattice sea fans, glowing-tip anemones, starfish/shells/pebbles,
+  bubble vents, plankton motes, and Voronoi-texture caustics drifting over the sand. Fish get a cyan
+  rim light, soft blob shadows on the sand, a 0.55 rad lean so their flank faces the overhead
+  camera, and ~1.3× size. The dragon is now one continuous tapered tube re-laid each frame through
+  its trail (head + spines + tail fin), swaying in an S. Cannon: gold pedestal, bet-coloured gem
+  ring and barrel bands. HUD: Genex logo (`assets/ui/logo.png`) and gold coin
+  (`assets/ui/coin.png`, also the flying coin sprite), cleaned from the Genex originals by
+  `assets/src/clean_ui.py`; glossy buttons.
+- Genex 3D model lane failed upstream (provider out of credit, refunded) — dragon/shark/turtle stay
+  procedural. Local Blender is not installed. Revisit generated models when the lane is back.
 - Daily calendar is a server-side `day` counter (never the device clock); Settings has a
   "next day (test)" button to exercise bonus/goal/ad rollovers.
 
@@ -60,12 +73,13 @@ notifications, TR/EN, account placeholder, privacy/terms placeholders.
 Controls: aim with mouse (or arrows/A-D), fire click/hold or Space.
 
 Studio: `config.begin` → straight into play; demos `menu, play, kill, boss, goldshark, store,
-collection, settings, out, results, genex-cover` (cover = dragon + volley + catch, camera b in
-`src/cover-shot.js`). Probes report balance, bet, fish by tier, session stats, observed RTP.
+collection, settings, out, results, genex-cover` (cover = dragon S-curve + volley from the cannon
++ side catch, staging `a` in `src/cover-shot.js`, camera framed from the dragon's position). Probes report balance, bet, fish by tier, session stats, observed RTP.
 
 Known issues / next:
 - Profile is not persisted (fresh 1000 coins each load) — would be the backend DB.
 - Real IAP / AdMob / analytics backends not wired (stubs with the right call points).
 - Privacy policy / terms are placeholders pending legal review (the brief requires one).
 - Leaderboard not built (brief: "to be clarified with vendor").
-- Dragon body segments read as beads; could get a smoother tube body.
+- Bosses/large fish are procedural; generated models would raise quality further.
+- English menu shows a text title (the logo image reads "BALIK AVI").

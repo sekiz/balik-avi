@@ -19,6 +19,7 @@ import { Sound } from "./game/audio.js";
 import { UI } from "./game/ui.js";
 import { i18n } from "./game/i18n.js";
 import { makeCoverShots } from "./cover-shot.js";
+import { createPost } from "./game/post.js";
 
 // ── FACET WIRING ──
 // (facet imports and initialization go here)
@@ -32,6 +33,7 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(42, 16 / 9, 0.1, 200);
 const renderStats = { calls: 0, triangles: 0 };
+let post = null;
 
 const FISH_Y = 3.0;
 const CAM_POS = new THREE.Vector3(0, 27, 14.5);
@@ -72,6 +74,7 @@ function resize() {
   const width = Math.max(1, innerWidth);
   const height = Math.max(1, innerHeight);
   renderer.setSize(width, height, false);
+  post?.setSize(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   computeBounds();
@@ -81,6 +84,7 @@ addEventListener("resize", resize);
 
 // ── world ──
 const world = buildWorld(scene);
+post = createPost(renderer, scene, camera);
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.3;
 const school = new FishSchool(scene, bounds);
@@ -88,7 +92,7 @@ const fx = new Effects(scene);
 let cannon = null;
 cannon = buildCannon(scene);
 function placeCannon() {
-  cannon.root.position.set(0, FISH_Y - 0.9, bounds.zBottom - 0.6);
+  cannon.root.position.set(0, FISH_Y - 1.2, bounds.zBottom - 1.5);
 }
 resize();
 
@@ -323,7 +327,7 @@ function resolveHit(b, f) {
     sound.play("coin", { volume: big ? 0.7 : 0.4, rate: big ? 0.9 : 1.1 });
   }
   if (res.first) {
-    G.banner = G.banner && G.banner.t < 1 ? G.banner : { text: i18n.t("newFish", { n: i18n.speciesName(f.sp) }), t: 0, life: 2.2, color: "#8af0ff" };
+    G.banner = G.banner && G.banner.t < 1 ? G.banner : { text: i18n.t("newFish", { n: i18n.speciesName(f.sp) }), t: 0, life: 2.2, color: "#8af0ff", size: 28 };
   }
 }
 
@@ -466,11 +470,14 @@ function hudBlocks(p) {
 
 // ── screens ──
 const fmt = (n) => Math.round(n).toLocaleString("tr-TR");
+const COIN_IMG = "assets/ui/coin.png";
+const LOGO_IMG = "assets/ui/logo.png";
+const LOGO_ASPECT = 900 / 541;
 const COIN_PATH = "M50 6a44 44 0 1 0 0.1 0Z M50 20a30 30 0 1 1 -0.1 0Z";
 
 function coinBadge(cx, cy, value) {
   ui.panel("bal:bg", cx, cy, 0.3, 0.075, { fill: "rgba(4,24,44,0.85)", stroke: "#ffd23a", radius: 0.037, width: 0.004 });
-  ui.path("bal:icon", COIN_PATH, cx - 0.3 / camera.aspect / 2 + 0.035 / camera.aspect + 0.004, cy, 0.056, 0.056, { fill: "#ffc21a", stroke: "#8a5a00", width: 0.004 });
+  ui.image("bal:icon", COIN_IMG, cx - 0.3 / camera.aspect / 2 + 0.03 / camera.aspect, cy, 0.072, 192 / 198);
   ui.text("bal:v", fmt(value), cx + 0.02, cy, { size: 26, color: "#ffe680", weight: 800 });
 }
 
@@ -480,8 +487,9 @@ function drawScreen(dt, ctx, pressed) {
   switch (G.screen) {
     case "boot": {
       ui.panel("boot:veil", 0.5, 0.5, 4, 1.2, { fill: "rgba(2,18,34,0.55)", stroke: "rgba(0,0,0,0)", radius: 0 });
-      ui.text("boot:title", t("title"), 0.5, 0.42, { size: 84, color: "#ffe066", weight: 900 });
-      ui.text("boot:sub", t("subtitle"), 0.5, 0.52, { size: 24, color: "#bff4ff" });
+      if (i18n.lang === "tr") ui.image("boot:logo", LOGO_IMG, 0.5, 0.36, 0.42, LOGO_ASPECT);
+      else ui.text("boot:title", t("title"), 0.5, 0.38, { size: 84, color: "#ffe066", weight: 900 });
+      ui.text("boot:sub", t("subtitle"), 0.5, 0.6 - 0.04, { size: 24, color: "#bff4ff" });
       ui.bar("boot:bar", Math.min(1, G.bootT / 1.6), 0.5, 0.62, 0.6, 0.014, { color: "#3fd9ff" });
       ui.text("boot:load", t("loading"), 0.5, 0.66, { size: 16, color: "#9fcfe0" });
       if (pressed.has("Enter") || pressed.has("Space") || pressed.has("Mouse1")) G.screen = "menu";
@@ -489,9 +497,10 @@ function drawScreen(dt, ctx, pressed) {
     }
     case "menu": {
       coinBadge(0.13, 0.07, G.shownBalance);
-      ui.text("menu:title", t("title"), 0.5, 0.2, { size: 78, color: "#ffe066", weight: 900 });
-      ui.text("menu:sub", t("subtitle"), 0.5, 0.29, { size: 22, color: "#bff4ff" });
-      if (ui.button("menu:play", t("play"), 0.5, 0.48, 0.42, 0.11, { color: "#f08a1c", size: 40, key: "Enter" })) startPlay();
+      if (i18n.lang === "tr") ui.image("menu:logo", LOGO_IMG, 0.5, 0.2, 0.3, LOGO_ASPECT);
+      else ui.text("menu:title", t("title"), 0.5, 0.19, { size: 78, color: "#ffe066", weight: 900 });
+      ui.text("menu:sub", t("subtitle"), 0.5, 0.375, { size: 20, color: "#bff4ff" });
+      if (ui.button("menu:play", t("play"), 0.5, 0.5, 0.42, 0.11, { color: "#f08a1c", size: 40, key: "Enter" })) startPlay();
       const row = 0.66;
       const items = [
         ["menu:store", t("store"), "store", "#1f9ed9"],
@@ -566,7 +575,7 @@ function drawScreen(dt, ctx, pressed) {
   if (G.banner && G.screen === "playing" && !G.overlay) {
     const k = G.banner.t / G.banner.life;
     const pulse = 1 + Math.sin(G.banner.t * 10) * 0.04;
-    ui.text("banner", G.banner.text, 0.5, 0.21, { size: Math.round(46 * pulse), color: k > 0.85 ? "rgba(255,255,255,0.4)" : G.banner.color, weight: 900 });
+    ui.text("banner", G.banner.text, 0.5, 0.21, { size: Math.round((G.banner.size ?? 46) * pulse), color: k > 0.85 ? "rgba(255,255,255,0.4)" : G.banner.color, weight: 900 });
   }
 }
 
@@ -612,7 +621,7 @@ function drawStore(t) {
     const cx = 0.5 + (i - 1) * 0.42 / camera.aspect;
     ui.panel(`pack:${i}`, cx, 0.46, 0.38, 0.4, { fill: "rgba(8,40,70,0.9)", stroke: "#ffd23a", radius: 0.03 });
     const coinStack = i + 1;
-    for (let k = 0; k < coinStack + 1; k++) ui.path(`pack:${i}:c${k}`, COIN_PATH, cx + (k - coinStack / 2) * 0.03 / camera.aspect, 0.36 - k * 0.006, 0.07, 0.07, { fill: "#ffc21a", stroke: "#8a5a00", width: 0.004 });
+    for (let k = 0; k < coinStack + 1; k++) ui.image(`pack:${i}:c${k}`, COIN_IMG, cx + (k - coinStack / 2) * 0.04 / camera.aspect, 0.36 - k * 0.008, 0.08 + i * 0.01, 192 / 198);
     ui.text(`pack:${i}:n`, fmt(p.coins), cx, 0.46, { size: 34, color: "#ffe680", weight: 900 });
     ui.text(`pack:${i}:b`, p.bonus ? t("bonus", { n: fmt(p.bonus) }) : " ", cx, 0.51, { size: 16, color: "#7dff9a" });
     if (ui.button(`pack:${i}:buy`, `${p.priceTry}`, cx, 0.6, 0.26, 0.07, { color: "#f08a1c", size: 22, sub: null })) {
@@ -787,6 +796,12 @@ function forceSpawn(species, x, z) {
   if (speciesById(species).tier === "boss") G.service.session.bossAlive = true;
   const f = school.spawn(entry, G.rng);
   f.base.set(x, f.base.y, z);
+  // head toward the middle of the field so a staged fish stays in view
+  if (Math.abs(x) > 0.5) {
+    f.dir.set(-Math.sign(x), 0, 0.12).normalize();
+    f.side.set(-f.dir.z, 0, f.dir.x);
+    f.group.rotation.y = Math.atan2(-f.dir.z, f.dir.x);
+  }
   f.pos.copy(f.base);
   f.entered = true;
   f.group.position.copy(f.pos);
@@ -821,8 +836,8 @@ const demos = {
       reset(G.seed);
       startPlay();
       forceSpawn("dragon", -2, -2);
-      G.banner = { text: i18n.t("bossIncoming"), t: 0, life: 3, color: "#ff5a3a" };
-      simulate(1.2);
+      G.banner = { text: i18n.t("bossIncoming"), t: 0, life: 6, color: "#ff5a3a" };
+      simulate(3.5);
       return { boss: school.list.some((f) => f.sp.id === "dragon") };
     },
     goldshark() {
@@ -894,6 +909,7 @@ const coverShots = makeCoverShots({
     fx.net(p, 10);
     fx.coinBurst(p, 22, cannon.root.position.clone().add(new THREE.Vector3(0, 1.5, 0)), G.rng);
   },
+  cannonPos: () => cannon.root.position.clone(),
   hideOverlays() {
     window.__studio.hud.clear();
     aimDots.visible = false;
@@ -907,7 +923,7 @@ const coverShots = makeCoverShots({
     cameras.cover();
   },
 });
-demos["genex-cover"] = coverShots.b;
+demos["genex-cover"] = coverShots.a;
 
 const studio = installStudio({
   canvas: renderer.domElement,
@@ -918,9 +934,9 @@ const studio = installStudio({
   reset,
   update,
   render() {
-    renderer.render(scene, camera);
-    renderStats.calls = renderer.info.render.calls;
-    renderStats.triangles = renderer.info.render.triangles;
+    post.render(swimTime.value);
+    renderStats.calls = post.stats.calls;
+    renderStats.triangles = post.stats.triangles;
   },
   flow() {
     if (G.screen === "boot") return "boot";

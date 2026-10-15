@@ -64,6 +64,13 @@ export class UI {
     this.hud.path(id, d, { x: cx - w / this.aspect / 2, y: cy - h / 2, w, h, anchor: "top-left", ...opts });
   }
 
+  /** An image centred at (cx, cy); h in frame heights, w from the image's own aspect unless given. */
+  image(id, src, cx, cy, h, aspect = 1) {
+    this.mark(id);
+    const w = h * aspect;
+    this.hud.image(id, src, { x: cx - w / this.aspect / 2, y: cy - h / 2, w, h, anchor: "top-left" });
+  }
+
   /** @returns {boolean} true on the frame the button is pressed */
   button(id, label, cx, cy, w, h, { color = "#1fa3d9", text = "#ffffff", size = 24, key = null, enabled = true, sub = null } = {}) {
     const hover = enabled && this.inside(cx, cy, w, h);
@@ -74,6 +81,13 @@ export class UI {
       stroke: hover ? "#ffffff" : "rgba(255,255,255,0.45)",
       radius: h * 0.32,
       width: 0.004,
+    });
+    // glossy top half
+    this.panel(`${id}:gl`, cx, cy - h * 0.2, w * 0.94, h * 0.46, {
+      fill: enabled ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.05)",
+      stroke: "rgba(0,0,0,0)",
+      radius: h * 0.22,
+      width: 0,
     });
     this.text(`${id}:t`, label, cx, sub ? cy - h * 0.14 : cy, { size, color: enabled ? text : "#9aa8b4", weight: 800 });
     if (sub) this.text(`${id}:s`, sub, cx, cy + h * 0.24, { size: size * 0.55, color: "rgba(255,255,255,0.85)", weight: 600 });

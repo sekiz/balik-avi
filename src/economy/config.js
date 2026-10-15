@@ -46,7 +46,7 @@ export const SPECIES = [
   { id: "shark", tier: "large", mult: [20, 25], weight: 2, speed: 2.2, nameTr: "Köpekbalığı", nameEn: "Shark" },
   // ── boss: rare, entrance + shake ──
   { id: "goldshark", tier: "boss", mult: [100, 200], weight: 1, speed: 1.5, nameTr: "Altın Köpekbalığı", nameEn: "Golden Shark" },
-  { id: "dragon", tier: "boss", mult: [200, 500], weight: 1, speed: 1.3, nameTr: "Deniz Ejderhası", nameEn: "Sea Dragon" },
+  { id: "dragon", tier: "boss", mult: [200, 500], weight: 1, speed: 2.1, nameTr: "Deniz Ejderhası", nameEn: "Sea Dragon" },
 ];
 
 export const TIERS = ["small", "medium", "large", "boss"];

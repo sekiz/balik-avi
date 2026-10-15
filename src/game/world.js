@@ -1,6 +1,6 @@
 /** The aquarium: sandy seabed with moving caustics, rocks, corals, swaying kelp, light shafts, bubbles. */
 import * as THREE from "three";
-import { bakeTexture, makeRng, standardMaterial } from "../materials.js";
+import { bakeTexture, makeRng, standardMaterial, triplanar } from "../materials.js";
 import { swimTime } from "./fishmodels.js";
 
 function tag(o, t) {
@@ -8,12 +8,55 @@ function tag(o, t) {
   return o;
 }
 
-/** Add animated caustics (light network) to a lit material's diffuse. */
+/** Tileable Voronoi-edge texture: bright thin cell borders, the shape of real caustic light. */
+let causticTex = null;
+function causticTexture() {
+  if (causticTex) return causticTex;
+  const N = 256;
+  const c = document.createElement("canvas");
+  c.width = c.height = N;
+  const g = c.getContext("2d");
+  const img = g.createImageData(N, N);
+  const rng = makeRng(1234);
+  const pts = Array.from({ length: 22 }, () => [rng() * N, rng() * N]);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      let f1 = 1e9;
+      let f2 = 1e9;
+      for (const [px, py] of pts) {
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let ox = -1; ox <= 1; ox++) {
+            const dx = x - (px + ox * N);
+            const dy = y - (py + oy * N);
+            const d = dx * dx + dy * dy;
+            if (d < f1) {
+              f2 = f1;
+              f1 = d;
+            } else if (d < f2) f2 = d;
+          }
+        }
+      }
+      const e = Math.sqrt(f2) - Math.sqrt(f1); // 0 on the cell edge
+      const v = Math.max(0, 1 - e / 9) ** 2.2;
+      const i = (y * N + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = Math.round(v * 255);
+      img.data[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  causticTex = new THREE.CanvasTexture(c);
+  causticTex.wrapS = causticTex.wrapT = THREE.RepeatWrapping;
+  return causticTex;
+}
+
+/** Add animated caustics (two drifting Voronoi layers, min-combined) to a lit material. */
 function caustics(material, strength = 0.55) {
   const prev = material.onBeforeCompile;
+  const tex = causticTexture();
   material.onBeforeCompile = (shader, r) => {
     prev?.(shader, r);
     shader.uniforms.uTime = swimTime;
+    shader.uniforms.uCaustic = { value: tex };
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vWorldC;")
       .replace("#include <worldpos_vertex>", "#include <worldpos_vertex>\nvWorldC = (modelMatrix * vec4(transformed, 1.0)).xyz;");
@@ -23,28 +66,19 @@ function caustics(material, strength = 0.55) {
         `#include <common>
         varying vec3 vWorldC;
         uniform float uTime;
-        float causticLayer(vec2 p, float t) {
-          vec2 i = p;
-          float c = 1.0;
-          float inten = 0.005;
-          for (int n = 0; n < 4; n++) {
-            float tt = t * (1.0 - (3.5 / float(n + 1)));
-            i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
-            c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / inten), p.y / (cos(i.y + tt) / inten)));
-          }
-          c /= 4.0;
-          c = 1.17 - pow(c, 1.4);
-          return pow(abs(c), 8.0);
-        }`,
+        uniform sampler2D uCaustic;`,
       )
       .replace(
         "#include <emissivemap_fragment>",
         `#include <emissivemap_fragment>
-        float cst = causticLayer(mod(vWorldC.xz * 0.35, 6.2831) , uTime * 0.35 + 23.0);
-        totalEmissiveRadiance += vec3(0.55, 0.85, 1.0) * clamp(cst, 0.0, 1.2) * ${strength.toFixed(2)} * diffuseColor.rgb;`,
+        vec2 cuv = vWorldC.xz * 0.11;
+        float ca = texture2D(uCaustic, cuv + vec2(uTime * 0.021, uTime * 0.013)).r;
+        float cb = texture2D(uCaustic, cuv * 1.27 + vec2(-uTime * 0.017, uTime * 0.024) + 0.37).r;
+        float cst = min(ca, cb) * 1.6 + ca * cb * 0.8;
+        totalEmissiveRadiance += vec3(0.75, 0.95, 1.0) * cst * ${strength.toFixed(2)} * (0.05 + diffuseColor.rgb * 0.9);`,
       );
   };
-  material.customProgramCacheKey = () => `caustic${strength}`;
+  material.customProgramCacheKey = () => `caustic${strength}${material.userData.triplanar ? "t" : ""}`;
   return material;
 }
 
@@ -133,75 +167,278 @@ function sway(material) {
   return material;
 }
 
+
+/** Canvas texture helper. */
+function canvasTex(w, h, paint, { repeat = 1, srgb = true } = {}) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  paint(c.getContext("2d"), w, h);
+  const t = new THREE.CanvasTexture(c);
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeat, repeat);
+  t.anisotropy = 4;
+  return t;
+}
+
+/** Bumpy brain-coral texture: meandering grooves. */
+function brainTexture(base, groove) {
+  return canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = base;
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = groove;
+    g.lineWidth = 5;
+    const r = makeRng(77);
+    for (let i = 0; i < 40; i++) {
+      g.beginPath();
+      let x = r() * w;
+      let y = r() * h;
+      g.moveTo(x, y);
+      for (let k = 0; k < 14; k++) {
+        x += (r() - 0.5) * 40;
+        y += (r() - 0.5) * 40;
+        g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+  });
+}
+
+/** Sea-fan lattice with alpha. */
+function fanTexture(col) {
+  return canvasTex(256, 256, (g, w, h) => {
+    g.strokeStyle = col;
+    g.lineCap = "round";
+    const r = makeRng(5);
+    function br(x, y, a, len, wdt, d) {
+      const x2 = x + Math.cos(a) * len;
+      const y2 = y - Math.sin(a) * len;
+      g.lineWidth = wdt;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x2, y2);
+      g.stroke();
+      if (d > 0) {
+        br(x2, y2, a + 0.35 + r() * 0.2, len * 0.78, wdt * 0.72, d - 1);
+        br(x2, y2, a - 0.35 - r() * 0.2, len * 0.78, wdt * 0.72, d - 1);
+      }
+    }
+    br(w / 2, h, Math.PI / 2, 60, 9, 6);
+    g.lineWidth = 1.5;
+    g.globalAlpha = 0.55;
+    for (let y = 20; y < h; y += 9) {
+      g.beginPath();
+      g.moveTo(20, y);
+      g.lineTo(w - 20, y + 4);
+      g.stroke();
+    }
+    g.globalCompositeOperation = "destination-in";
+    g.globalAlpha = 1;
+    const grad = g.createRadialGradient(w / 2, h, 10, w / 2, h, w * 0.62);
+    grad.addColorStop(0, "#fff");
+    grad.addColorStop(0.9, "#fff");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+  }, { repeat: 1 });
+}
+
+function starfishTexture(col) {
+  return canvasTex(128, 128, (g, w, h) => {
+    g.fillStyle = col;
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = "rgba(255,255,255,0.55)";
+    const r = makeRng(9);
+    for (let i = 0; i < 120; i++) {
+      g.beginPath();
+      g.arc(r() * w, r() * h, 1 + r() * 2.2, 0, Math.PI * 2);
+      g.fill();
+    }
+  });
+}
+
+function sandTexture() {
+  // warm sand with ripples and grain; tiling
+  return canvasTex(512, 512, (g, w, h) => {
+    g.fillStyle = "#b9a57c";
+    g.fillRect(0, 0, w, h);
+    const r = makeRng(31);
+    for (let i = 0; i < 9000; i++) {
+      const v = 120 + r() * 90;
+      g.fillStyle = `rgba(${v},${v * 0.9},${v * 0.68},${0.25 + r() * 0.3})`;
+      g.fillRect(r() * w, r() * h, 1 + r() * 2, 1 + r() * 2);
+    }
+    g.strokeStyle = "rgba(90,70,40,0.18)";
+    g.lineWidth = 6;
+    for (let y = -20; y < h + 20; y += 26) {
+      g.beginPath();
+      for (let x = 0; x <= w; x += 8) g.lineTo(x, y + Math.sin((x / w) * Math.PI * 4 + y * 0.05) * 7);
+      g.stroke();
+    }
+    g.strokeStyle = "rgba(255,245,220,0.16)";
+    g.lineWidth = 3;
+    for (let y = -14; y < h + 20; y += 26) {
+      g.beginPath();
+      for (let x = 0; x <= w; x += 8) g.lineTo(x, y + Math.sin((x / w) * Math.PI * 4 + y * 0.05) * 7);
+      g.stroke();
+    }
+  }, { repeat: 7 });
+}
+
+function shellTexture() {
+  return canvasTex(128, 128, (g, w, h) => {
+    const grad = g.createLinearGradient(0, 0, w, 0);
+    grad.addColorStop(0, "#f7d9c4");
+    grad.addColorStop(1, "#e89a7a");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = "rgba(150,70,50,0.6)";
+    g.lineWidth = 3;
+    for (let x = 6; x < w; x += 12) {
+      g.beginPath();
+      g.moveTo(x, 0);
+      g.lineTo(x, h);
+      g.stroke();
+    }
+  });
+}
+
+/** Anemone tentacle sway + glowing tips (emissive by height). */
+function anemoneMat(color, tip) {
+  const m = new THREE.MeshStandardMaterial({ color: 0xffffff, map: canvasTex(64, 64, (g, w, h) => {
+    const grad = g.createLinearGradient(0, h, 0, 0);
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, tip);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+  }), roughness: 0.5, emissive: new THREE.Color(tip), emissiveIntensity: 0.0 });
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = swimTime;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nuniform float uTime;\nvarying float vH;")
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        float hgt = clamp(position.y / 0.9, 0.0, 1.0);
+        vH = hgt;
+        float ph = modelMatrix[3].x * 1.7 + modelMatrix[3].z * 1.3;
+        transformed.x += sin(uTime * 1.8 + ph) * 0.18 * hgt * hgt;
+        transformed.z += cos(uTime * 1.5 + ph) * 0.14 * hgt * hgt;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying float vH;")
+      .replace("#include <emissivemap_fragment>", `#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * smoothstep(0.75, 1.0, vH) * 1.4;`);
+  };
+  m.customProgramCacheKey = () => "anemone";
+  return m;
+}
+
+function lump(rng, detailW = 22, detailH = 16, rough = 0.18) {
+  const geo = new THREE.SphereGeometry(1, detailW, detailH);
+  const p = geo.attributes.position;
+  const k1 = rng() * 10;
+  const k2 = rng() * 10;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const n =
+      0.82 +
+      rough * Math.sin(v.x * 2.3 + k1) * Math.cos(v.z * 2.1 - k2) +
+      rough * 0.6 * Math.sin(v.y * 4.1 + v.x * 3.3 + k2) +
+      rough * 0.3 * Math.sin(v.z * 7.7 + k1);
+    v.multiplyScalar(n);
+    if (v.y < 0) v.y *= 0.3;
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
 export function buildWorld(scene) {
   const rng = makeRng(4242);
-  scene.background = new THREE.Color(0x0a3a5a);
-  scene.fog = new THREE.Fog(0x0b5878, 16, 46);
+  scene.background = new THREE.Color(0x05304f);
+  scene.fog = new THREE.Fog(0x0a5a86, 14, 50);
 
-  const hemi = new THREE.HemisphereLight(0x9fe6ff, 0x0d2a3a, 1.0);
+  const hemi = new THREE.HemisphereLight(0x8fd8ff, 0x0a2238, 0.85);
   hemi.userData.tag = "light-fill";
   scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xfff2d6, 1.7);
-  sun.position.set(6, 30, 8);
+  const sun = new THREE.DirectionalLight(0xfff0d0, 2.4);
+  sun.position.set(-10, 30, -6);
   sun.userData.tag = "light-key";
   scene.add(sun);
+  const bounce = new THREE.DirectionalLight(0x3fb8ff, 0.6);
+  bounce.position.set(8, 6, 14);
+  bounce.userData.tag = "light-rim";
+  scene.add(bounce);
 
   const root = tag(new THREE.Group(), "seabed");
   scene.add(root);
 
-  // sand
-  const sandMat = caustics(
-    standardMaterial({ kind: "dirt", seed: 11, palette: [0x9a9270, 0xb5a983, 0x7d7a60], repeat: 6, bumpScale: 0.8 }),
-    0.7,
-  );
-  const sandGeo = new THREE.PlaneGeometry(80, 60, 80, 60);
+  // ── sand ──
+  const sandMap = sandTexture();
+  const sandBump = bakeTexture({ kind: "dirt", seed: 11, repeat: 7 }).bumpMap;
+  const sandMat = caustics(new THREE.MeshStandardMaterial({ map: sandMap, bumpMap: sandBump, bumpScale: 1.2, roughness: 0.95, color: 0x9fb4b4 }), 1.0);
+  const sandGeo = new THREE.PlaneGeometry(90, 64, 120, 90);
   sandGeo.rotateX(-Math.PI / 2);
   const sp = sandGeo.attributes.position;
   for (let i = 0; i < sp.count; i++) {
     const x = sp.getX(i);
     const z = sp.getZ(i);
-    sp.setY(i, Math.sin(x * 0.35) * 0.18 + Math.cos(z * 0.5 + x * 0.1) * 0.22 + Math.max(0, Math.abs(x) - 14) * 0.25);
+    const edge = Math.max(0, Math.abs(x) - 13) * 0.35 + Math.max(0, -z - 9) * 0.3;
+    sp.setY(i, Math.sin(x * 0.35) * 0.2 + Math.cos(z * 0.5 + x * 0.1) * 0.25 + edge);
   }
   sandGeo.computeVertexNormals();
-  const sand = tag(new THREE.Mesh(sandGeo, sandMat), "ground");
-  root.add(sand);
+  root.add(tag(new THREE.Mesh(sandGeo, sandMat), "ground"));
 
-  // rocks
-  const rockMat = caustics(standardMaterial({ kind: "stone", seed: 5, palette: [0x4d5a5e, 0x6f7c78, 0x8a9488], repeat: 2 }), 0.5);
-  const mossMat = caustics(standardMaterial({ kind: "moss", seed: 8, palette: [0x2f5a3a, 0x4d7a45, 0x6a9a50], repeat: 2 }), 0.5);
+  // ── reef rock formations framing the field ──
+  const rockMat = caustics(
+    triplanar(standardMaterial({ kind: "stone", seed: 5, palette: [0x5a4a3e, 0x7d6c5a, 0x9a8a74], repeat: 1, bumpScale: 1.5 }), { scale: 0.35 }),
+    0.6,
+  );
+  const mossMat = caustics(
+    triplanar(standardMaterial({ kind: "moss", seed: 8, palette: [0x2d5a36, 0x3f7a44, 0x7aa858], repeat: 1 }), { scale: 0.45 }),
+    0.6,
+  );
   const rocks = tag(new THREE.Group(), "rock");
   root.add(rocks);
-  const rockSpots = [
-    [-15, -8, 2.2], [-12.5, -9.5, 1.4], [14.5, -7.5, 2.6], [16.5, -4, 1.6], [-16.5, 1, 1.8], [16, 4, 2.0],
-    [-14, 7.5, 1.6], [13, 8.5, 1.3], [-5, -10.5, 1.5], [6.5, -10.8, 1.9], [0.5, -11.5, 1.2],
+  const rockGeos = Array.from({ length: 6 }, () => lump(rng));
+  // clusters: [x, z, scale, count]
+  const clusters = [
+    [-17.5, -9, 3.2, 5], [-18.5, -1, 2.6, 4], [-17, 7, 2.8, 4], [17.5, -8.5, 3.3, 5], [18.5, 0.5, 2.6, 4], [17, 7.5, 2.7, 4],
+    [-9, -12.5, 2.4, 3], [0, -13, 2.2, 3], [9, -12.5, 2.5, 3], [-11, 10.5, 1.8, 2], [11, 10.5, 1.8, 2],
   ];
-  for (const [x, z, s] of rockSpots) {
-    const geo = new THREE.SphereGeometry(1, 20, 14);
-    const p = geo.attributes.position;
-    const k1 = rng() * 10;
-    for (let i = 0; i < p.count; i++) {
-      const v = new THREE.Vector3().fromBufferAttribute(p, i);
-      const n = 0.8 + 0.18 * Math.sin(v.x * 2.3 + k1) * Math.cos(v.z * 2.1 - k1) + 0.1 * Math.sin(v.y * 4.1 + v.x * 3.3);
-      v.multiplyScalar(n);
-      v.y *= 0.6;
-      p.setXYZ(i, v.x, v.y, v.z);
+  for (const [cx, cz, s, n] of clusters) {
+    for (let i = 0; i < n; i++) {
+      const rock = new THREE.Mesh(rockGeos[Math.floor(rng() * rockGeos.length)], rockMat);
+      const sc = s * (0.45 + rng() * 0.6);
+      rock.position.set(cx + (rng() - 0.5) * s * 1.6, sc * 0.2, cz + (rng() - 0.5) * s * 1.4);
+      rock.scale.set(sc * (1 + rng() * 0.5), sc * (0.55 + rng() * 0.5), sc);
+      rock.rotation.y = rng() * 6;
+      rocks.add(rock);
+      if (rng() < 0.55) {
+        const cap = new THREE.Mesh(rock.geometry, mossMat);
+        cap.position.copy(rock.position).add(new THREE.Vector3(0, rock.scale.y * 0.35, 0));
+        cap.scale.set(rock.scale.x * 0.8, rock.scale.y * 0.45, rock.scale.z * 0.8);
+        cap.rotation.copy(rock.rotation);
+        rocks.add(cap);
+      }
     }
-    geo.computeVertexNormals();
-    const rock = new THREE.Mesh(geo, rng() < 0.4 ? mossMat : rockMat);
-    rock.position.set(x, s * 0.25, z);
-    rock.scale.setScalar(s);
-    rock.rotation.y = rng() * 6;
-    rocks.add(rock);
   }
 
-  // corals: branching tubes and fan discs, around the edges
+  // ── corals ──
   const coralCols = [
-    [0xff6f91, 0xff9eb5, 0xd9476e],
-    [0xff9a3c, 0xffc07a, 0xd9711a],
-    [0xb486ff, 0xd2b5ff, 0x8a5ad9],
-    [0x3fd9c4, 0x8af0e0, 0x1fa894],
+    [0xff4f7a, 0xff8fae, 0xc22a55],
+    [0xff8a1c, 0xffb45a, 0xd25e0a],
+    [0xa66bff, 0xcaa2ff, 0x7a3ce0],
+    [0x22d6c0, 0x7af2e0, 0x0fa08c],
+    [0xffd23a, 0xfff08a, 0xd9a20a],
   ];
-  const coralMats = coralCols.map((pal, i) => caustics(standardMaterial({ kind: "chitin", seed: 20 + i, palette: pal, repeat: 1 }), 0.35));
+  const coralMats = coralCols.map((pal, i) => {
+    const m = caustics(standardMaterial({ kind: "chitin", seed: 20 + i, palette: pal, repeat: 1, roughness: 0.55 }), 0.4);
+    m.emissive = new THREE.Color(pal[0]).multiplyScalar(0.12);
+    return m;
+  });
   const corals = tag(new THREE.Group(), "coral");
   root.add(corals);
   function branch(parent, start, dir, len, rad, depth, mat) {
@@ -209,7 +446,7 @@ export function buildWorld(scene) {
     const mid = start.clone().lerp(end, 0.5).add(new THREE.Vector3((rng() - 0.5) * 0.3, 0, (rng() - 0.5) * 0.3));
     const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
     parent.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 6, rad, 7), mat));
-    const tip = new THREE.Mesh(new THREE.SphereGeometry(rad * 1.15, 8, 6), mat);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(rad * 1.2, 8, 6), mat);
     tip.position.copy(end);
     parent.add(tip);
     if (depth <= 0) return;
@@ -219,28 +456,128 @@ export function buildWorld(scene) {
       branch(parent, end, d, len * 0.72, rad * 0.7, depth - 1, mat);
     }
   }
-  const coralSpots = [
-    [-13.5, -6, 0], [-16, -2.5, 1], [-11.5, -10, 2], [12.5, -9.5, 3], [15, -1, 0], [17, 6.5, 2],
-    [-17, 5, 3], [-11.5, 9.5, 1], [10.5, 10.5, 0], [-2.5, -11, 1], [3.5, -11.5, 2], [-8, -11, 3],
+  const brainMats = [
+    caustics(new THREE.MeshStandardMaterial({ map: brainTexture("#d98a5a", "#7a3a20"), roughness: 0.7, bumpMap: brainTexture("#ffffff", "#000000"), bumpScale: 2 }), 0.5),
+    caustics(new THREE.MeshStandardMaterial({ map: brainTexture("#8ac25a", "#2f5a20"), roughness: 0.7, bumpMap: brainTexture("#ffffff", "#000000"), bumpScale: 2 }), 0.5),
   ];
-  for (const [x, z, m] of coralSpots) {
+  const brainGeo = lump(rng, 28, 20, 0.08);
+  const tubeMat = caustics(standardMaterial({ kind: "chitin", seed: 44, palette: [0x7a3ce0, 0xb486ff, 0x4a1a9a], repeat: 1 }), 0.4);
+  const tubeGeo = new THREE.CylinderGeometry(0.22, 0.3, 1, 14, 1, true);
+  tubeGeo.translate(0, 0.5, 0);
+  tubeMat.side = THREE.DoubleSide;
+  const fanMats = ["#ff5f8a", "#ffb33a", "#b486ff"].map(
+    (c) => new THREE.MeshStandardMaterial({ map: fanTexture(c), transparent: true, alphaTest: 0.3, side: THREE.DoubleSide, roughness: 0.6 }),
+  );
+  const fanGeo = new THREE.PlaneGeometry(3, 3);
+  fanGeo.translate(0, 1.5, 0);
+  const anemones = [anemoneMat("#ff6fa8", "#fff0a0"), anemoneMat("#3fd9ff", "#e0fff8"), anemoneMat("#a66bff", "#ffd0ff")];
+  const tentacle = new THREE.CylinderGeometry(0.025, 0.06, 0.9, 6, 4);
+  tentacle.translate(0, 0.45, 0);
+
+  // place coral gardens along the reef edges (never in the open middle)
+  const edgeSpot = () => {
+    const side = rng();
+    if (side < 0.38) return [-14 - rng() * 5, -11 + rng() * 21];
+    if (side < 0.76) return [14 + rng() * 5, -11 + rng() * 21];
+    if (side < 0.92) return [-13 + rng() * 26, -11 - rng() * 2.5];
+    return [(rng() < 0.5 ? -1 : 1) * (7 + rng() * 6), 9 + rng() * 2.5];
+  };
+  for (let i = 0; i < 16; i++) {
+    const [x, z] = edgeSpot();
     const g = new THREE.Group();
-    branch(g, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), 1.0 + rng() * 0.6, 0.14, 2, coralMats[m]);
-    g.position.set(x, 0.1, z);
-    g.scale.setScalar(1 + rng() * 0.6);
+    branch(g, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), 1.0 + rng() * 0.6, 0.15, 2, coralMats[i % coralMats.length]);
+    g.position.set(x, 0.15, z);
+    g.scale.setScalar(1.1 + rng() * 0.7);
     corals.add(g);
   }
-  // fan corals
-  for (const [x, z, m] of [[-15, -10, 0], [14, -11, 2], [17.5, 1.5, 1], [-17.5, -6.5, 2]]) {
-    const geo = new THREE.CircleGeometry(1.6, 24, 0, Math.PI);
-    const fan = new THREE.Mesh(geo, coralMats[m].clone());
-    fan.material.side = THREE.DoubleSide;
-    fan.position.set(x, 0.1, z);
-    fan.rotation.y = rng() * 3;
-    corals.add(fan);
+  for (let i = 0; i < 12; i++) {
+    const [x, z] = edgeSpot();
+    const b = new THREE.Mesh(brainGeo, brainMats[i % 2]);
+    const s = 0.8 + rng() * 0.9;
+    b.position.set(x, s * 0.25, z);
+    b.scale.set(s, s * 0.7, s);
+    corals.add(b);
+  }
+  for (let i = 0; i < 8; i++) {
+    const [x, z] = edgeSpot();
+    const g = new THREE.Group();
+    const n = 3 + Math.floor(rng() * 4);
+    for (let k = 0; k < n; k++) {
+      const t = new THREE.Mesh(tubeGeo, tubeMat);
+      t.position.set((rng() - 0.5) * 0.9, 0, (rng() - 0.5) * 0.9);
+      t.scale.set(1, 0.8 + rng() * 1.8, 1);
+      t.rotation.set((rng() - 0.5) * 0.3, 0, (rng() - 0.5) * 0.3);
+      g.add(t);
+    }
+    g.position.set(x, 0.1, z);
+    corals.add(g);
+  }
+  for (let i = 0; i < 9; i++) {
+    const [x, z] = edgeSpot();
+    const f = new THREE.Mesh(fanGeo, fanMats[i % fanMats.length]);
+    f.position.set(x, 0.1, z);
+    f.rotation.set(-0.15, rng() * Math.PI, 0);
+    f.scale.setScalar(0.8 + rng() * 0.7);
+    corals.add(f);
+  }
+  const anemoneRoot = tag(new THREE.Group(), "anemone");
+  root.add(anemoneRoot);
+  for (let i = 0; i < 12; i++) {
+    const [x, z] = edgeSpot();
+    const g = new THREE.Group();
+    const mat = anemones[i % anemones.length];
+    for (let k = 0; k < 26; k++) {
+      const t = new THREE.Mesh(tentacle, mat);
+      const a = k * 2.399;
+      const r = 0.12 + (k / 26) * 0.38;
+      t.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+      t.rotation.set(Math.sin(a) * r * 1.2, 0, -Math.cos(a) * r * 1.2);
+      g.add(t);
+    }
+    g.position.set(x, 0.2, z);
+    g.scale.setScalar(1 + rng() * 0.8);
+    anemoneRoot.add(g);
   }
 
-  // kelp
+  // ── small details on the open sand: starfish, shells, pebbles ──
+  const details = tag(new THREE.Group(), "prop");
+  root.add(details);
+  const starShape = new THREE.Shape();
+  for (let k = 0; k <= 10; k++) {
+    const a = (k / 10) * Math.PI * 2 + Math.PI / 2;
+    const r = k % 2 ? 0.22 : 0.6;
+    if (k === 0) starShape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else starShape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  const starGeo = new THREE.ExtrudeGeometry(starShape, { depth: 0.08, bevelEnabled: true, bevelThickness: 0.06, bevelSize: 0.06, bevelSegments: 2 });
+  starGeo.rotateX(-Math.PI / 2);
+  const starMats = ["#ff6a3a", "#ff3f7a", "#ffb02a"].map((c) => new THREE.MeshStandardMaterial({ map: starfishTexture(c), roughness: 0.7 }));
+  for (let i = 0; i < 7; i++) {
+    const s = new THREE.Mesh(starGeo, starMats[i % 3]);
+    s.position.set(-15 + rng() * 30, 0.35, -10 + rng() * 19);
+    s.rotation.y = rng() * 6;
+    s.scale.setScalar(0.45 + rng() * 0.35);
+    details.add(s);
+  }
+  const shellGeo = new THREE.SphereGeometry(0.35, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2);
+  shellGeo.scale(1, 0.45, 1.2);
+  const shellMat = new THREE.MeshStandardMaterial({ map: shellTexture(), roughness: 0.4 });
+  for (let i = 0; i < 10; i++) {
+    const s = new THREE.Mesh(shellGeo, shellMat);
+    s.position.set(-16 + rng() * 32, 0.25, -10 + rng() * 20);
+    s.rotation.y = rng() * 6;
+    details.add(s);
+  }
+  const pebbleMat = caustics(standardMaterial({ kind: "stone", seed: 66, palette: [0x6a6258, 0x8c8272, 0xa69a86], repeat: 1 }), 0.6);
+  const pebbleGeo = lump(rng, 10, 8, 0.15);
+  for (let i = 0; i < 60; i++) {
+    const s = new THREE.Mesh(pebbleGeo, pebbleMat);
+    s.position.set(-17 + rng() * 34, 0.2, -11 + rng() * 22);
+    s.scale.set(0.15 + rng() * 0.25, 0.1 + rng() * 0.12, 0.15 + rng() * 0.25);
+    details.add(s);
+  }
+
+  // ── kelp ──
   const kelpMat = sway(
     new THREE.MeshStandardMaterial({ map: seaweedTexture(), transparent: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.8 }),
   );
@@ -248,70 +585,93 @@ export function buildWorld(scene) {
   root.add(kelp);
   const kelpGeo = new THREE.PlaneGeometry(0.9, 5, 1, 10);
   kelpGeo.translate(0, 2.5, 0);
-  for (let i = 0; i < 34; i++) {
+  for (let i = 0; i < 40; i++) {
     const side = i % 2 ? 1 : -1;
-    const x = side * (13 + rng() * 6);
-    const z = -11 + rng() * 22;
-    for (let k = 0; k < 2; k++) {
+    const x = side * (15 + rng() * 5);
+    const z = -12 + rng() * 23;
+    for (let k = 0; k < 3; k++) {
       const blade = new THREE.Mesh(kelpGeo, kelpMat);
-      blade.position.set(x + (rng() - 0.5) * 0.6, 0, z + (rng() - 0.5) * 0.6);
+      blade.position.set(x + (rng() - 0.5) * 0.8, 0.5, z + (rng() - 0.5) * 0.8);
       blade.rotation.y = rng() * Math.PI;
-      blade.scale.y = 0.6 + rng() * 0.7;
+      blade.scale.set(1, 0.7 + rng() * 0.8, 1);
       kelp.add(blade);
     }
   }
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 14; i++) {
     const blade = new THREE.Mesh(kelpGeo, kelpMat);
-    blade.position.set(-12 + rng() * 24, 0, -12 - rng() * 2);
+    blade.position.set(-13 + rng() * 26, 0.5, -12.5 - rng() * 2);
     blade.rotation.y = rng() * Math.PI;
-    blade.scale.y = 0.7 + rng() * 0.6;
+    blade.scale.y = 0.8 + rng() * 0.6;
     kelp.add(blade);
   }
 
-  // light shafts
+  // ── light shafts ──
   const shaftMat = new THREE.MeshBasicMaterial({
     map: shaftTexture(),
     transparent: true,
-    opacity: 0.09,
+    opacity: 0.07,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     side: THREE.DoubleSide,
     color: 0xc8f0ff,
+    fog: false,
   });
   const shafts = tag(new THREE.Group(), "lightshaft");
   scene.add(shafts);
-  for (let i = 0; i < 7; i++) {
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(2.5 + rng() * 2.5, 26), shaftMat);
-    m.position.set(-14 + i * 4.6 + rng(), 10, -6 + rng() * 6);
-    m.rotation.set(-0.6, 0, 0.35);
+  for (let i = 0; i < 8; i++) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(2 + rng() * 3, 30), shaftMat);
+    m.position.set(-16 + i * 4.4 + rng(), 10, -5 + rng() * 6);
+    m.rotation.set(-0.55, 0, 0.32);
     m.userData.phase = rng() * 6;
     shafts.add(m);
   }
 
-  // ambient bubbles
-  const bubbleMat = new THREE.SpriteMaterial({ map: bubbleTexture(), transparent: true, depthWrite: false, opacity: 0.8 });
+  // ── bubbles + drifting plankton motes ──
+  const bubbleMat = new THREE.SpriteMaterial({ map: bubbleTexture(), transparent: true, depthWrite: false, opacity: 0.75 });
   const bubbles = tag(new THREE.Group(), "bubble");
   scene.add(bubbles);
-  for (let i = 0; i < 36; i++) {
+  // bubble columns rising from vents in the reef
+  const vents = [[-15.5, -5], [16, -2], [-14.5, 6], [15, 8]];
+  for (let i = 0; i < 48; i++) {
     const b = new THREE.Sprite(bubbleMat);
-    const s = 0.1 + rng() * 0.22;
+    const s = 0.12 + rng() * 0.25;
     b.scale.set(s, s, s);
-    b.position.set(-18 + rng() * 36, rng() * 10, -11 + rng() * 22);
-    b.userData.speed = 0.6 + rng() * 1.1;
-    b.userData.phase = rng() * 6;
+    const v = vents[i % vents.length];
+    b.position.set(v[0] + (rng() - 0.5) * 0.6, rng() * 14, v[1] + (rng() - 0.5) * 0.6);
+    b.userData = { speed: 1.2 + rng() * 1.4, phase: rng() * 6, vx: v[0], vz: v[1] };
     bubbles.add(b);
+  }
+  const moteTex = canvasTex(32, 32, (g, w, h) => {
+    const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, "rgba(220,255,255,1)");
+    grad.addColorStop(1, "rgba(220,255,255,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+  });
+  const motes = new THREE.Group();
+  motes.userData.tag = "plankton";
+  scene.add(motes);
+  const moteMat = new THREE.SpriteMaterial({ map: moteTex, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending });
+  for (let i = 0; i < 70; i++) {
+    const m = new THREE.Sprite(moteMat);
+    m.scale.setScalar(0.08 + rng() * 0.12);
+    m.position.set(-18 + rng() * 36, 1 + rng() * 9, -11 + rng() * 22);
+    m.userData.phase = rng() * 6;
+    motes.add(m);
   }
 
   return {
     update(dt, t) {
-      for (const s of shafts.children) {
-        s.material.opacity = 0.09;
-        s.position.x += Math.sin(t * 0.2 + s.userData.phase) * dt * 0.15;
-      }
+      for (const s of shafts.children) s.position.x += Math.sin(t * 0.2 + s.userData.phase) * dt * 0.15;
       for (const b of bubbles.children) {
-        b.position.y += b.userData.speed * dt;
-        b.position.x += Math.sin(t * 2 + b.userData.phase) * dt * 0.2;
-        if (b.position.y > 12) b.position.y = 0;
+        const u = b.userData;
+        b.position.y += u.speed * dt;
+        b.position.x = u.vx + Math.sin(t * 2 + u.phase) * 0.25 * (b.position.y / 6);
+        if (b.position.y > 15) b.position.y = 0.3;
+      }
+      for (const m of motes.children) {
+        m.position.x += Math.sin(t * 0.3 + m.userData.phase) * dt * 0.12;
+        m.position.y += Math.cos(t * 0.25 + m.userData.phase) * dt * 0.08;
       }
     },
   };

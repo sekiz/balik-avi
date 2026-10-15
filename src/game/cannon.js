@@ -26,7 +26,30 @@ export function buildCannon(scene) {
   ring.position.y = 0.02;
   root.add(ring);
 
+  // gem ring around the dais — glows in the bet colour
+  const gemMat = new THREE.MeshStandardMaterial({ color: 0x0a1a2a, emissive: 0x5fd3ff, emissiveIntensity: 2.2, roughness: 0.15, metalness: 0.2, map: brass.map });
+  const gemGeo = new THREE.OctahedronGeometry(0.2, 0);
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2;
+    const gm = new THREE.Mesh(gemGeo, gemMat);
+    gm.position.set(Math.cos(a) * 2.45, 0.05, Math.sin(a) * 2.45);
+    gm.scale.set(1, 0.6, 1);
+    root.add(gm);
+  }
+  const outer = new THREE.Mesh(new THREE.TorusGeometry(2.75, 0.1, 8, 64), brass);
+  outer.rotation.x = Math.PI / 2;
+  outer.position.y = -0.05;
+  root.add(outer);
+  // fluted golden pedestal under the turret
+  const ped = new THREE.Mesh(
+    new THREE.LatheGeometry([[0, 0], [1.6, 0], [1.6, 0.12], [1.35, 0.2], [1.3, 0.38], [1.45, 0.46], [0, 0.46]].map(([r, y]) => new THREE.Vector2(r, y)), 36),
+    brass,
+  );
+  ped.position.y = -0.1;
+  root.add(ped);
+
   const turret = new THREE.Group();
+  turret.position.y = 0.3;
   root.add(turret);
   const base = new THREE.Mesh(new THREE.SphereGeometry(1.15, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2), steel);
   base.scale.y = 0.75;
@@ -50,6 +73,7 @@ export function buildCannon(scene) {
   gem.position.set(0, 0.95, 0.2);
   turret.add(gem);
 
+  const bandGeo = new THREE.TorusGeometry(0.33, 0.06, 8, 24);
   let current = 0;
   function setBet(bet) {
     if (bet === current) return;
@@ -58,13 +82,20 @@ export function buildCannon(scene) {
     const count = bet >= 10 ? 4 : bet >= 5 ? 3 : bet >= 2 ? 2 : 1;
     const spread = 0.5;
     for (let i = 0; i < count; i++) {
-      const b = new THREE.Mesh(barrelGeo, i % 2 ? steel : brass);
+      const b = new THREE.Mesh(barrelGeo, brass);
+      const band = new THREE.Mesh(bandGeo, glowMat);
+      band.position.z = -1.36;
+      b.add(band);
+      const band2 = band.clone();
+      band2.position.z = -2.2;
+      b.add(band2);
       b.position.x = (i - (count - 1) / 2) * spread;
       const s = count === 1 ? 1.15 : 1;
       b.scale.set(s * (count > 2 ? 0.8 : 1), s * (count > 2 ? 0.8 : 1), s);
       barrels.add(b);
     }
     glowMat.emissive.setHex(betColor(bet));
+    gemMat.emissive.setHex(betColor(bet));
   }
   setBet(1);
 

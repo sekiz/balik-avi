@@ -1,19 +1,37 @@
 /** Fish runtime: entering, swimming (straight / zig-zag / slow curve / boss S), dying, leaving. */
 import * as THREE from "three";
 import { speciesById } from "../economy/config.js";
-import { buildDragonHead, buildDragonSegment, buildFish, newFlash } from "./fishmodels.js";
+import { buildDragonBody, buildDragonHead, buildDragonSegment, buildFish, newFlash } from "./fishmodels.js";
 
 /** Body length in world units per species. */
 export const LENGTH = {
-  clown: 1.7, tang: 1.8, yellow: 1.7, neon: 1.5,
-  angel: 2.6, puffer: 2.3, parrot: 2.9, lion: 2.8,
-  turtle: 4.6, manta: 5.8, shark: 6.6,
-  goldshark: 9.0, dragon: 2.4,
+  clown: 2.2, tang: 2.3, yellow: 2.2, neon: 1.9,
+  angel: 3.2, puffer: 2.8, parrot: 3.5, lion: 3.4,
+  turtle: 5.4, manta: 6.6, shark: 7.4,
+  goldshark: 9.6, dragon: 2.6,
 };
 
 const DEPTH = { small: 3.4, medium: 3.1, large: 2.6, boss: 2.1 };
 const DRAGON_SEGMENTS = 13;
 const DRAGON_SPACING = 1.2;
+
+let shadowTex = null;
+function shadowTexture() {
+  if (shadowTex) return shadowTex;
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 31);
+  grad.addColorStop(0, "rgba(0,10,25,0.55)");
+  grad.addColorStop(0.6, "rgba(0,10,25,0.25)");
+  grad.addColorStop(1, "rgba(0,10,25,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  shadowTex = new THREE.CanvasTexture(c);
+  return shadowTex;
+}
+const shadowGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+let shadowMat = null;
 
 export class FishSchool {
   constructor(scene, bounds) {
@@ -23,6 +41,10 @@ export class FishSchool {
     this.root.userData.tag = "fish";
     scene.add(this.root);
     this.list = [];
+    this.shadows = new THREE.Group();
+    this.shadows.userData.tag = "fish-shadow";
+    scene.add(this.shadows);
+    shadowMat ??= new THREE.MeshBasicMaterial({ map: shadowTexture(), transparent: true, depthWrite: false, fog: false });
     this.speedScale = 1;
     this.onLeave = null;
   }
@@ -46,7 +68,7 @@ export class FishSchool {
       flash = newFlash();
       group = new THREE.Group();
       const head = buildDragonHead(flash);
-      head.scale.setScalar(L / 2 * 1.7);
+      head.scale.setScalar(L / 2 * 2.1);
       group.add(head);
       segments = [];
       for (let i = 0; i < DRAGON_SEGMENTS; i++) {
@@ -54,9 +76,13 @@ export class FishSchool {
         const taper = 1 - (i / DRAGON_SEGMENTS) * 0.55;
         seg.scale.setScalar(1.6 * taper);
         seg.userData.r = 0.65 * taper;
+        seg.children[0].visible = false; // the continuous body tube draws the flesh; anchors keep fins + hit circles
         this.root.add(seg);
         segments.push(seg);
       }
+      var dragonBody = buildDragonBody(flash);
+      dragonBody.mesh.userData.tag = "boss";
+      this.root.add(dragonBody.mesh);
     } else {
       group = buildFish(sp.id);
       flash = group.userData.flash;
@@ -101,6 +127,7 @@ export class FishSchool {
       sp,
       group,
       segments,
+      body: typeof dragonBody !== "undefined" ? dragonBody : null,
       trail: segments ? [] : null,
       flash,
       base: pos.clone(),
@@ -111,7 +138,7 @@ export class FishSchool {
       speed: sp.speed * (0.9 + rng() * 0.2),
       behavior,
       t: 0,
-      phase: rng() * 6.28,
+      phase: sp.id === "dragon" ? 0 : rng() * 6.28, // the dragon's sway starts on its centre line, matching its laid trail
       turn: (rng() - 0.5) * 0.12,
       entered: false,
       dying: 0,
@@ -120,7 +147,13 @@ export class FishSchool {
       school: entry.school ?? null,
     };
     group.position.copy(pos);
+    group.rotation.order = "YXZ";
     group.rotation.y = Math.atan2(-dir.z, dir.x);
+    // bony fish lean their flank toward the overhead camera so their side pattern reads
+    fish.roll = sp.id === "manta" || sp.id === "turtle" || sp.id === "dragon" ? 0 : -0.55;
+    group.rotation.x = fish.roll;
+    fish.shadow = this.makeShadow(L * (sp.id === "manta" ? 1.0 : sp.id === "turtle" ? 0.9 : 0.75), L * (sp.id === "manta" ? 0.9 : sp.id === "turtle" ? 0.75 : 0.35));
+    if (segments) fish.segShadows = segments.map((sg) => this.makeShadow(1.6 * (sg.userData.r / 0.65), 1.4 * (sg.userData.r / 0.65)));
     if (segments) {
       for (let i = 0; i < 260; i++) fish.trail.push(pos.clone().addScaledVector(dir, -i * 0.12));
       this.placeSegments(fish);
@@ -149,7 +182,32 @@ export class FishSchool {
       seg.rotation.y = Math.atan2(-(look.z - p.z), look.x - p.x);
       last = p;
     }
+    if (f.body) this.layBody(f, 1);
     return last;
+  }
+
+  layBody(f, k) {
+    const yaw = f.group.rotation.y;
+    const fwd = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    const pts = [f.pos.clone().addScaledVector(fwd, -0.4), f.pos.clone().addScaledVector(fwd, -1.2)];
+    for (const seg of f.segments) pts.push(seg.position.clone());
+    f.body.update(pts, 0.85 * k);
+  }
+
+  makeShadow(w, h) {
+    const m = new THREE.Mesh(shadowGeo, shadowMat);
+    m.scale.set(w, 1, h);
+    m.renderOrder = -1;
+    this.shadows.add(m);
+    return m;
+  }
+
+  syncShadow(sh, obj, scale = 1) {
+    // the key light is up-left: shadows fall down-right on the sand, softer and wider for higher fish
+    sh.position.set(obj.position.x + obj.position.y * 0.33, 0.5, obj.position.z + obj.position.y * 0.2);
+    sh.rotation.y = obj.rotation.y;
+    sh.material.opacity = 1;
+    sh.visible = scale > 0.02;
   }
 
   /** Hit circles in world space: [{x, z, r}] */
@@ -198,7 +256,7 @@ export class FishSchool {
         const k = f.dying / (f.sp.tier === "boss" ? 1.8 : 1.0);
         f.group.rotation.x = Math.sin(f.dying * 18) * 0.5;
         f.group.rotation.z = f.dying * 6;
-        const s = (f.L / 2) * (f.sp.id === "dragon" ? 1.7 : 1) * Math.max(0, 1 - k * k);
+        const s = (f.L / 2) * (f.sp.id === "dragon" ? 2.1 : 1) * Math.max(0, 1 - k * k);
         f.group.scale.setScalar(Math.max(0.0001, s));
         f.flash.value.setRGB(1.2 * (1 - k), 0.9 * (1 - k), 0.2);
         if (f.segments) {
@@ -206,11 +264,16 @@ export class FishSchool {
             seg.scale.setScalar(Math.max(0.0001, 1.6 * (1 - (si / DRAGON_SEGMENTS) * 0.55) * Math.max(0, 1 - k * 1.2 + si * 0.02)));
             seg.rotation.z = f.dying * 5;
           });
+          this.layBody(f, Math.max(0.01, 1 - k * 1.1));
         }
+        f.shadow.visible = k < 0.7;
+        if (f.segShadows) for (const sh of f.segShadows) sh.visible = k < 0.7;
         if (k >= 1) this.remove(i);
         continue;
       }
       f.flash.value.setRGB(f.hitGlow * 0.9, f.hitGlow * 0.15, f.hitGlow * 0.1);
+      f.group.rotation.x = f.roll; // flank toward the overhead camera (local +z leans up for any heading)
+      f.group.rotation.z = 0;
       const v = f.speed * this.speedScale;
       if (f.behavior === "curve") f.dir.applyAxisAngle(THREE.Object3D.DEFAULT_UP, f.turn * dt);
       if (f.behavior === "boss") f.dir.applyAxisAngle(THREE.Object3D.DEFAULT_UP, Math.sin(f.t * 0.35 + f.phase) * 0.12 * dt);
@@ -221,7 +284,7 @@ export class FishSchool {
       if (f.behavior === "zigzag") f.pos.addScaledVector(f.side, Math.sin(f.t * 1.6 + f.phase) * 1.4);
       if (f.behavior === "boss") {
         f.pos.y = f.base.y + Math.sin(f.t * 0.8) * 0.3;
-        if (f.segments) f.pos.addScaledVector(f.side, Math.sin(f.t * 1.1 + f.phase) * 2.2);
+        if (f.segments) f.pos.addScaledVector(f.side, Math.sin(f.t * 0.75 + f.phase) * 1.6);
       }
       f.group.position.copy(f.pos);
       const dx = f.pos.x - f.prev.x;
@@ -241,6 +304,8 @@ export class FishSchool {
         if (f.trail.length > 300) f.trail.pop();
         this.placeSegments(f);
       }
+      this.syncShadow(f.shadow, f.group);
+      if (f.segShadows) f.segShadows.forEach((sh, si) => this.syncShadow(sh, f.segments[si]));
       const inside = Math.abs(f.pos.x) < b.halfW(f.pos.z) && f.pos.z > b.zTop && f.pos.z < b.zBottom;
       if (inside) f.entered = true;
       const far = f.segments ? 22 : f.L + 3;
@@ -255,7 +320,13 @@ export class FishSchool {
   remove(i) {
     const f = this.list[i];
     this.root.remove(f.group);
+    if (f.shadow) this.shadows.remove(f.shadow);
+    if (f.segShadows) for (const sh of f.segShadows) this.shadows.remove(sh);
     if (f.segments) for (const s of f.segments) this.root.remove(s);
+    if (f.body) {
+      this.root.remove(f.body.mesh);
+      f.body.mesh.geometry.dispose();
+    }
     this.list.splice(i, 1);
   }
 }

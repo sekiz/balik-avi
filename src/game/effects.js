@@ -84,6 +84,12 @@ export class Effects {
     this.glowTex = radial([[0, "rgba(255,255,255,1)"], [0.25, "rgba(255,255,255,0.8)"], [1, "rgba(255,255,255,0)"]]);
     this.netTex = netTexture();
     this.coinTex = coinTexture();
+    // the generated gold coin replaces the canvas one once it decodes
+    new THREE.TextureLoader().load("assets/ui/coin.png", (t) => {
+      t.colorSpace = THREE.SRGBColorSpace;
+      this.coinMat.map = t;
+      this.coinMat.needsUpdate = true;
+    });
     this.coinMat = new THREE.SpriteMaterial({ map: this.coinTex, transparent: true, depthWrite: false });
     this.bullets = [];
     this.nets = [];
@@ -107,12 +113,13 @@ export class Effects {
   addBullet(shotId, bet, pos, dir) {
     const col = new THREE.Color(betColor(bet));
     const g = new THREE.Group();
-    const core = new THREE.Mesh(this.bulletGeo, new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: col, emissiveIntensity: 2.2, map: this.glowTex }));
+    const core = new THREE.Mesh(this.bulletGeo, new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.9, map: this.glowTex }));
     const s = 0.85 + Math.log2(bet + 1) * 0.25;
     core.scale.setScalar(s);
     g.add(core);
     const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: col, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-    halo.scale.setScalar(1.6 * s);
+    halo.scale.setScalar(1.3 * s);
+    halo.material.opacity = 0.6;
     g.add(halo);
     g.position.copy(pos);
     this.bulletTag.add(g);

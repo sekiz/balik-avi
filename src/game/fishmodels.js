@@ -162,7 +162,7 @@ const SKINS = {
     }
   },
   dragon(g, w, h) {
-    vertical(g, w, h, [[0, "#6a0808"], [0.4, "#b8160e"], [0.62, "#e8a020"], [1, "#ffd870"]]);
+    vertical(g, w, h, [[0, "#c8140c"], [0.35, "#ff3a1a"], [0.6, "#ffb020"], [1, "#ffe890"]]);
   },
 };
 
@@ -269,7 +269,13 @@ function swimify(material, { mode = 0, amp = 0.12, freq = 9, flash }) {
       );
     shader.fragmentShader = shader.fragmentShader
       .replace("#include <common>", "#include <common>\nuniform vec3 uFlash;")
-      .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += uFlash;");
+      .replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+        totalEmissiveRadiance += uFlash;
+        float rimF = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
+        totalEmissiveRadiance += vec3(0.35, 0.75, 1.0) * pow(rimF, 2.6) * 0.55;`,
+      );
   };
   material.customProgramCacheKey = () => `swim${mode}`;
   return material;
@@ -592,8 +598,8 @@ export function buildDragonSegment(flash, tailEnd = false) {
   const seg = new THREE.Mesh(cached("dseg", () => latheBody((t) => 0.3 + 0.22 * Math.sin(Math.PI * t), { height: 1, width: 1, rings: 10 }).scale(0.55, 1, 1)), bodyMaterial("dragon", flash, opts, { glow: 0x2a0600 }));
   g.add(seg);
   const fin = new THREE.Mesh(cached("dsegfin", () => {
-    const geo = finGeometry([[0.4, 0], [0.0, 0.42], [-0.4, 0]]);
-    geo.translate(0, 0.25, 0);
+    const geo = finGeometry([[0.45, 0], [0.1, 0.35], [-0.2, 0.75], [-0.45, 0]]);
+    geo.translate(0, 0.42, 0);
     return geo;
   }), finMaterial("#ffb21a", flash, opts));
   g.add(fin);
@@ -607,6 +613,74 @@ export function buildDragonSegment(flash, tailEnd = false) {
     g.add(tail);
   }
   return g;
+}
+
+/**
+ * The dragon's continuous body: a tube re-laid every frame through the head and the trailing
+ * segment anchors, tapering to the tail, with red back / gold belly scales.
+ */
+export function buildDragonBody(flash) {
+  const RINGS = 72;
+  const SIDES = 14;
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(RINGS * SIDES * 3);
+  const uv = new Float32Array(RINGS * SIDES * 2);
+  const idx = [];
+  for (let r = 0; r < RINGS; r++) {
+    for (let k = 0; k < SIDES; k++) {
+      const a = (k / (SIDES - 1)) * Math.PI * 2;
+      uv[(r * SIDES + k) * 2] = (r / (RINGS - 1)) * 9;
+      uv[(r * SIDES + k) * 2 + 1] = 1 - Math.abs(a / Math.PI - 1);
+      if (r < RINGS - 1 && k < SIDES - 1) {
+        const i0 = r * SIDES + k;
+        idx.push(i0, i0 + SIDES, i0 + 1, i0 + 1, i0 + SIDES, i0 + SIDES + 1);
+      }
+    }
+  }
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  const map = skinTexture("dragon").clone();
+  map.wrapS = THREE.RepeatWrapping;
+  map.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({ map, roughness: 0.4, metalness: 0.15, emissive: new THREE.Color(0x401000), emissiveMap: map });
+  swimify(mat, { mode: 0, amp: 0, freq: 1, flash });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  const curve = new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3(1, 0, 0)]);
+  const P = new THREE.Vector3();
+  const T = new THREE.Vector3();
+  const N = new THREE.Vector3();
+  const B = new THREE.Vector3();
+  const UP = new THREE.Vector3(0, 1, 0);
+  return {
+    mesh,
+    /** points: world positions head → tail; radius0: radius at the neck. */
+    update(points, radius0) {
+      curve.points = points;
+      for (let r = 0; r < RINGS; r++) {
+        const t = r / (RINGS - 1);
+        curve.getPointAt(t, P);
+        curve.getTangentAt(t, T);
+        B.crossVectors(T, UP).normalize();
+        N.crossVectors(B, T).normalize();
+        // thick behind the head, swelling a little, tapering hard to the tail
+        const rad = radius0 * (0.85 + 0.25 * Math.sin(Math.min(1, t * 2.2) * Math.PI * 0.5)) * (1 - t * t * 0.82);
+        for (let k = 0; k < SIDES; k++) {
+          const a = (k / (SIDES - 1)) * Math.PI * 2;
+          const c = Math.cos(a) * rad;
+          const sn = Math.sin(a) * rad * 1.05;
+          const i = (r * SIDES + k) * 3;
+          pos[i] = P.x + N.x * c + B.x * sn;
+          pos[i + 1] = P.y + N.y * c + B.y * sn;
+          pos[i + 2] = P.z + N.z * c + B.z * sn;
+        }
+      }
+      geo.attributes.position.needsUpdate = true;
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+    },
+  };
 }
 
 /** Build a fish group for a species (not the dragon — see fishes.js). */
